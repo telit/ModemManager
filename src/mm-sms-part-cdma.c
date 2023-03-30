@@ -675,7 +675,7 @@ read_cause_codes (MMSmsPart              *sms_part,
     guint8 cause_code;
     MMSmsDeliveryState delivery_state;
 
-    g_assert (parameter->parameter_id == PARAMETER_ID_BEARER_REPLY_OPTION);
+    g_assert (parameter->parameter_id == PARAMETER_ID_CAUSE_CODES);
 
     if (parameter->parameter_len != 1 && parameter->parameter_len != 2) {
         mm_obj_dbg (log_object, "        invalid cause codes length found (%u): ignoring",
@@ -789,32 +789,39 @@ read_bearer_data_user_data (MMSmsPart              *sms_part,
         }                           \
     } while (0)
 
-#define SUBPARAMETER_SIZE_CHECK(required_size)                             \
-    if (subparameter->parameter_len < required_size) {                  \
-        mm_obj_dbg (log_object, "        cannot read user data, need at least %u bytes (got %u)", \
-                required_size,                                          \
-                subparameter->parameter_len);                           \
-        return;                                                         \
-    }
+#define SUBPARAMETER_SIZE_CHECK_BITS(required_bits)                     \
+    do {                                                                \
+        guint required_bytes;                                           \
+                                                                        \
+        required_bytes = byte_offset + ((bit_offset + required_bits) / 8); \
+        if ((bit_offset + required_bits) % 8)                           \
+            required_bytes++;                                           \
+        if (subparameter->parameter_len < required_bytes) {             \
+            mm_obj_dbg (log_object, "        cannot read user data, need at least %u bytes (got %u)", \
+                        required_bytes,                                 \
+                        subparameter->parameter_len);                   \
+            return;                                                     \
+        }                                                               \
+    } while (0)
 
     g_assert (subparameter->parameter_id == SUBPARAMETER_ID_USER_DATA);
 
     /* Message encoding */
-    SUBPARAMETER_SIZE_CHECK (1);
+    SUBPARAMETER_SIZE_CHECK_BITS (5);
     message_encoding = read_bits (&subparameter->parameter_value[byte_offset], bit_offset, 5);
     OFFSETS_UPDATE (5);
     mm_obj_dbg (log_object, "            message encoding: %s", encoding_to_string (message_encoding));
 
     /* Message type, only if extended protocol message */
     if (message_encoding == ENCODING_EXTENDED_PROTOCOL_MESSAGE) {
-        SUBPARAMETER_SIZE_CHECK (2);
+        SUBPARAMETER_SIZE_CHECK_BITS (8);
         message_type = read_bits (&subparameter->parameter_value[byte_offset], bit_offset, 8);
         OFFSETS_UPDATE (8);
         mm_obj_dbg (log_object, "            message type: %u", message_type);
     }
 
     /* Number of fields */
-    SUBPARAMETER_SIZE_CHECK (byte_offset + 1 + ((bit_offset + 8) / 8));
+    SUBPARAMETER_SIZE_CHECK_BITS (8);
     num_fields = read_bits (&subparameter->parameter_value[byte_offset], bit_offset, 8);
     OFFSETS_UPDATE (8);
     mm_obj_dbg (log_object, "            num fields: %u", num_fields);
@@ -825,7 +832,7 @@ read_bearer_data_user_data (MMSmsPart              *sms_part,
         GByteArray *data;
         guint i;
 
-        SUBPARAMETER_SIZE_CHECK (byte_offset + 1 + ((bit_offset + (num_fields * 8)) / 8));
+        SUBPARAMETER_SIZE_CHECK_BITS (num_fields * 8);
 
         data = g_byte_array_sized_new (num_fields);
         g_byte_array_set_size (data, num_fields);
@@ -869,7 +876,13 @@ read_bearer_data_user_data (MMSmsPart              *sms_part,
         gchar *text;
         guint i;
 
-        SUBPARAMETER_SIZE_CHECK (byte_offset + ((bit_offset + (num_fields * 7)) / 8));
+        if (num_fields == 0) {
+            mm_obj_dbg (log_object, "            text: ''");
+            mm_sms_part_set_text (sms_part, "");
+            break;
+        }
+
+        SUBPARAMETER_SIZE_CHECK_BITS (num_fields * 7);
 
         text = g_malloc (num_fields + 1);
         for (i = 0; i < num_fields; i++) {
@@ -888,7 +901,13 @@ read_bearer_data_user_data (MMSmsPart              *sms_part,
         gchar *text;
         guint i;
 
-        SUBPARAMETER_SIZE_CHECK (byte_offset + 1 + ((bit_offset + (num_fields * 8)) / 8));
+        if (num_fields == 0) {
+            mm_obj_dbg (log_object, "            text: ''");
+            mm_sms_part_set_text (sms_part, "");
+            break;
+        }
+
+        SUBPARAMETER_SIZE_CHECK_BITS (num_fields * 8);
 
         latin = g_malloc (num_fields + 1);
         for (i = 0; i < num_fields; i++) {
@@ -915,10 +934,16 @@ read_bearer_data_user_data (MMSmsPart              *sms_part,
         guint i;
         guint num_bytes;
 
+        if (num_fields == 0) {
+            mm_obj_dbg (log_object, "            text: ''");
+            mm_sms_part_set_text (sms_part, "");
+            break;
+        }
+
         /* 2 bytes per field! */
         num_bytes = num_fields * 2;
 
-        SUBPARAMETER_SIZE_CHECK (byte_offset + 1 + ((bit_offset + (num_bytes * 8)) / 8));
+        SUBPARAMETER_SIZE_CHECK_BITS (num_bytes * 8);
 
         utf16 = g_malloc (num_bytes);
         for (i = 0; i < num_bytes; i++) {
@@ -943,7 +968,7 @@ read_bearer_data_user_data (MMSmsPart              *sms_part,
     }
 
 #undef OFFSETS_UPDATE
-#undef SUBPARAMETER_SIZE_CHECK
+#undef SUBPARAMETER_SIZE_CHECK_BITS
 }
 
 static void

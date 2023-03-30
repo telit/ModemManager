@@ -106,6 +106,27 @@ common_test_invalid_part_from_pdu (const guint8 *pdu,
 }
 
 static void
+common_test_valid_part_from_hexpdu (const gchar *hexpdu)
+{
+    g_autoptr(MMSmsPart)  part = NULL;
+    GError               *error = NULL;
+
+    part = mm_sms_part_cdma_new_from_pdu (0, hexpdu, NULL, &error);
+    g_assert (part != NULL);
+    g_assert (error == NULL);
+}
+
+static void
+common_test_valid_part_from_pdu (const guint8 *pdu,
+                                 gsize pdu_size)
+{
+    g_autofree gchar *hexpdu = NULL;
+
+    hexpdu = mm_utils_bin2hexstr (pdu, pdu_size);
+    common_test_valid_part_from_hexpdu (hexpdu);
+}
+
+static void
 test_pdu1 (void)
 {
     static const guint8 pdu[] = {
@@ -348,6 +369,49 @@ test_unicode_encoding (void)
         "中國哲學書電子化計劃");
 }
 
+static void
+test_empty_unicode_user_data (void)
+{
+    static const guint8 pdu[] = {
+        0x01, 0x08, 0x2f, 0x03, 0x01, 0x00, 0x00, 0x00,
+        0xfd, 0x00, 0x01, 0x02, 0x08, 0x00, 0x01, 0x02,
+        0x00, 0x00, 0x01, 0x02, 0x20, 0x01, 0x02, 0x00,
+        0x00, 0x00, 0x47, 0x06, 0x01, 0x02, 0x00, 0x06,
+        0x08, 0x08, 0x05, 0x01, 0x06, 0x01, 0x6d, 0x38,
+        0x00, 0x03, 0x05, 0x01, 0x06, 0x01, 0x02, 0x00,
+        0x06, 0x08, 0x08, 0x05, 0x01, 0x00, 0x00, 0x00,
+        0x47, 0x06, 0x01, 0x02, 0x00, 0x06, 0x08, 0x08,
+        0x05, 0x01, 0x06, 0x01, 0x6d, 0x38, 0x00, 0x03,
+        0x05, 0x01, 0x06, 0x01, 0x02, 0x00, 0x06, 0x08,
+        0x08, 0x05, 0x01, 0x06, 0x06, 0x00, 0x01, 0x00,
+        0x34, 0x00, 0x03, 0x05, 0x29, 0x08, 0x08, 0x05,
+        0x01, 0xb6, 0x01, 0x38, 0x00, 0x02, 0x02, 0x00 };
+
+    /* also invalid this one */
+    common_test_invalid_part_from_pdu (pdu, sizeof (pdu));
+}
+
+static void
+test_empty_ascii_user_data (void)
+{
+    static const guint8 pdu[] = {
+        0x00, 0x08, 0x08, 0x01, 0x06, 0x10, 0x34, 0x00,
+        0x00, 0x01, 0x00 };
+
+    /* valid but don't care about exact details */
+    common_test_valid_part_from_pdu (pdu, sizeof (pdu));
+}
+
+static void
+test_invalid_ascii_user_data (void)
+{
+    static const guint8 pdu[] = {
+        0x0, 0x8, 0x4, 0x1, 0x2, 0x10, 0xe };
+
+    /* valid but don't care about exact details */
+    common_test_valid_part_from_pdu (pdu, sizeof (pdu));
+}
+
 /********************* PDU CREATOR TESTS *********************/
 
 static void
@@ -553,6 +617,9 @@ int main (int argc, char **argv)
     g_test_add_func ("/MM/SMS/CDMA/PDU-Parser/latin-encoding", test_latin_encoding);
     g_test_add_func ("/MM/SMS/CDMA/PDU-Parser/latin-encoding-2", test_latin_encoding_2);
     g_test_add_func ("/MM/SMS/CDMA/PDU-Parser/unicode-encoding", test_unicode_encoding);
+    g_test_add_func ("/MM/SMS/CDMA/PDU-Parser/empty-unicode-user-data", test_empty_unicode_user_data);
+    g_test_add_func ("/MM/SMS/CDMA/PDU-Parser/empty-ascii-user-data", test_empty_ascii_user_data);
+    g_test_add_func ("/MM/SMS/CDMA/PDU-Parser/invalid-ascii-user-data", test_invalid_ascii_user_data);
 
     g_test_add_func ("/MM/SMS/CDMA/PDU-Creator/ascii-encoding", test_create_pdu_text_ascii_encoding);
     g_test_add_func ("/MM/SMS/CDMA/PDU-Creator/latin-encoding", test_create_pdu_text_latin_encoding);
