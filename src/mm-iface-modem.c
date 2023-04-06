@@ -1879,6 +1879,7 @@ periodic_signal_check_disable (MMIfaceModem *self,
         priv->signal_check_timeout_source = 0;
     }
 
+    priv->signal_check_running = FALSE;
     priv->signal_check_enabled = FALSE;
     mm_obj_dbg (self, "periodic signal checks disabled");
 }
