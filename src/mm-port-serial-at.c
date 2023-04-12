@@ -340,40 +340,28 @@ at_command_to_byte_array (const char *command, gboolean is_raw, gboolean send_lf
     return buf;
 }
 
-const gchar *
+gchar *
 mm_port_serial_at_command_finish (MMPortSerialAt *self,
                                   GAsyncResult *res,
                                   GError **error)
 {
-    GString *str;
-
-    if (g_simple_async_result_propagate_error (G_SIMPLE_ASYNC_RESULT (res), error))
-        return NULL;
-
-    str = (GString *)g_simple_async_result_get_op_res_gpointer (G_SIMPLE_ASYNC_RESULT (res));
-    return str->str;
-}
-
-static void
-string_free (GString *str)
-{
-    g_string_free (str, TRUE);
+    return g_task_propagate_pointer (G_TASK (res), error);
 }
 
 static void
 serial_command_ready (MMPortSerial *port,
                       GAsyncResult *res,
-                      GSimpleAsyncResult *simple)
+                      GTask *task)
 {
     GByteArray *response_buffer;
     GError *error = NULL;
     GString *response;
+    gchar *str;
 
     response_buffer = mm_port_serial_command_finish (port, res, &error);
     if (!response_buffer) {
-        g_simple_async_result_take_error (simple, error);
-        g_simple_async_result_complete (simple);
-        g_object_unref (simple);
+        g_task_return_error (task, error);
+        g_object_unref (task);
         return;
     }
 
@@ -384,11 +372,9 @@ serial_command_ready (MMPortSerial *port,
         g_byte_array_remove_range (response_buffer, 0, response_buffer->len);
     g_byte_array_unref (response_buffer);
 
-    g_simple_async_result_set_op_res_gpointer (simple,
-                                               response,
-                                               (GDestroyNotify)string_free);
-    g_simple_async_result_complete (simple);
-    g_object_unref (simple);
+    str = g_string_free (response, FALSE);
+    g_task_return_pointer (task, str, g_free);
+    g_object_unref (task);
 }
 
 void
@@ -401,8 +387,8 @@ mm_port_serial_at_command (MMPortSerialAt *self,
                            GAsyncReadyCallback callback,
                            gpointer user_data)
 {
-    GSimpleAsyncResult *simple;
     GByteArray *buf;
+    GTask *task;
 
     g_return_if_fail (self != NULL);
     g_return_if_fail (MM_IS_PORT_SERIAL_AT (self));
@@ -415,10 +401,7 @@ mm_port_serial_at_command (MMPortSerialAt *self,
                                      TRUE));
     g_return_if_fail (buf != NULL);
 
-    simple = g_simple_async_result_new (G_OBJECT (self),
-                                        callback,
-                                        user_data,
-                                        mm_port_serial_at_command);
+    task = g_task_new (self, NULL, callback, user_data);
 
     mm_port_serial_command (MM_PORT_SERIAL (self),
                             buf,
@@ -427,7 +410,7 @@ mm_port_serial_at_command (MMPortSerialAt *self,
                             is_raw, /* raw commands always run next, never queued last */
                             cancellable,
                             (GAsyncReadyCallback)serial_command_ready,
-                            simple);
+                            task);
     g_byte_array_unref (buf);
 }
 
