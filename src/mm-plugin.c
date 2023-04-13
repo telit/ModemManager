@@ -759,6 +759,8 @@ mm_plugin_supports_port (MMPlugin            *self,
     PortProbeRunContext *ctx;
     gboolean need_vendor_probing;
     gboolean need_product_probing;
+    MMPortProbeFlag subsystem_expected_flags;
+    MMPortProbeFlag plugin_expected_flags;
     MMPortProbeFlag probe_run_flags;
     gchar *probe_list_str;
 
@@ -797,43 +799,34 @@ mm_plugin_supports_port (MMPlugin            *self,
         return;
     }
 
-    /* Build flags depending on what probing needed */
-    probe_run_flags = MM_PORT_PROBE_NONE;
-    if (g_str_equal (mm_kernel_device_get_subsystem (port), "tty")) {
-        if (self->priv->at)
-            probe_run_flags |= MM_PORT_PROBE_AT;
-        else if (self->priv->single_at)
-            probe_run_flags |= MM_PORT_PROBE_AT;
-        if (self->priv->qcdm || self->priv->qcdm_required)
-            probe_run_flags |= MM_PORT_PROBE_QCDM;
-    } else if (g_str_equal (mm_kernel_device_get_subsystem (port), "usbmisc")) {
-        if (self->priv->qmi && !g_strcmp0 (mm_kernel_device_get_driver (port), "qmi_wwan"))
-            probe_run_flags |= MM_PORT_PROBE_QMI;
-        else if (self->priv->mbim && !g_strcmp0 (mm_kernel_device_get_driver (port), "cdc_mbim"))
-            probe_run_flags |= MM_PORT_PROBE_MBIM;
-        else
-            probe_run_flags |= MM_PORT_PROBE_AT;
-    } else if (g_str_equal (mm_kernel_device_get_subsystem (port), "rpmsg")) {
-        if (self->priv->at)
-            probe_run_flags |= MM_PORT_PROBE_AT;
-        if (self->priv->qmi)
-            probe_run_flags |= MM_PORT_PROBE_QMI;
-    } else if (g_str_equal (mm_kernel_device_get_subsystem (port), "wwan")) {
-        if (self->priv->mbim)
-            probe_run_flags |= MM_PORT_PROBE_MBIM;
-        if (self->priv->qmi)
-            probe_run_flags |= MM_PORT_PROBE_QMI;
-        if (self->priv->qcdm || self->priv->qcdm_required)
-            probe_run_flags |= MM_PORT_PROBE_QCDM;
-        if (self->priv->at)
-            probe_run_flags |= MM_PORT_PROBE_AT;
-    }
+    /* Build mask of flags based on subsystem */
+    subsystem_expected_flags = MM_PORT_PROBE_NONE;
+    if (g_str_equal (mm_kernel_device_get_subsystem (port), "tty"))
+        subsystem_expected_flags |= (MM_PORT_PROBE_AT | MM_PORT_PROBE_QCDM);
+    else if (g_str_equal (mm_kernel_device_get_subsystem (port), "usbmisc"))
+        subsystem_expected_flags |= (MM_PORT_PROBE_QMI | MM_PORT_PROBE_MBIM | MM_PORT_PROBE_AT);
+    else if (g_str_equal (mm_kernel_device_get_subsystem (port), "rpmsg"))
+        subsystem_expected_flags |= (MM_PORT_PROBE_AT | MM_PORT_PROBE_QMI);
+    else if (g_str_equal (mm_kernel_device_get_subsystem (port), "wwan"))
+        subsystem_expected_flags |= (MM_PORT_PROBE_QMI | MM_PORT_PROBE_MBIM | MM_PORT_PROBE_AT | MM_PORT_PROBE_QCDM);
 #if defined WITH_QRTR
-    else if (g_str_equal (mm_kernel_device_get_subsystem (port), "qrtr")) {
-        if (self->priv->qmi)
-            probe_run_flags |= MM_PORT_PROBE_QMI;
-    }
+    else if (g_str_equal (mm_kernel_device_get_subsystem (port), "qrtr"))
+        subsystem_expected_flags |= MM_PORT_PROBE_QMI;
 #endif
+
+    /* Build mask of flags based on plugin */
+    plugin_expected_flags = MM_PORT_PROBE_NONE;
+    if (self->priv->at)
+        plugin_expected_flags |= MM_PORT_PROBE_AT;
+    if (self->priv->qcdm || self->priv->qcdm_required)
+        plugin_expected_flags |= MM_PORT_PROBE_QCDM;
+    if (self->priv->qmi)
+        plugin_expected_flags |= MM_PORT_PROBE_QMI;
+    if (self->priv->mbim)
+        plugin_expected_flags |= MM_PORT_PROBE_MBIM;
+
+    /* Initial list of probe flags based on plugin and subsystem */
+    probe_run_flags = subsystem_expected_flags & plugin_expected_flags;
 
     /* For potential AT ports, check for more things */
     if (probe_run_flags & MM_PORT_PROBE_AT) {
@@ -1091,6 +1084,15 @@ mm_plugin_create_modem (MMPlugin  *self,
         next:
             if (!grabbed) {
                 mm_obj_warn (self, "could not grab port %s: %s", name, inner_error ? inner_error->message : "unknown error");
+
+                /* An ABORTED error is emitted exclusively when the port grabbing operation
+                 * detects that a REQUIRED port is unusable. */
+                if (g_error_matches (inner_error, MM_CORE_ERROR, MM_CORE_ERROR_ABORTED)) {
+                    g_propagate_error (error, inner_error);
+                    g_clear_object (&modem);
+                    return NULL;
+                }
+
                 g_clear_error (&inner_error);
             }
         }

@@ -101,9 +101,7 @@ struct _MMPortProbePrivate {
     gboolean is_ignored;
     gboolean is_gps;
     gboolean is_audio;
-    gboolean maybe_at_primary;
-    gboolean maybe_at_secondary;
-    gboolean maybe_at_ppp;
+    gboolean maybe_at;
     gboolean maybe_qcdm;
     gboolean maybe_qmi;
     gboolean maybe_mbim;
@@ -1505,7 +1503,7 @@ mm_port_probe_run (MMPortProbe                *self,
     }
 
     /* If this is a port flagged as being an AT port, don't do any other probing */
-    if (self->priv->maybe_at_primary || self->priv->maybe_at_secondary || self->priv->maybe_at_ppp) {
+    if (self->priv->maybe_at) {
         mm_obj_dbg (self, "no QCDM/QMI/MBIM probing in possible AT port");
         mm_port_probe_set_result_qcdm (self, FALSE);
         mm_port_probe_set_result_qmi  (self, FALSE);
@@ -1847,6 +1845,143 @@ mm_port_probe_get_port_subsys (MMPortProbe *self)
     return mm_kernel_device_get_subsystem (self->priv->port);
 }
 
+static void
+initialize_port_type_hints (MMPortProbe *self)
+{
+    g_autoptr(GString) udev_tags = NULL;
+    guint              n_udev_hints = 0;
+    gboolean           auto_maybe_qmi = FALSE;
+    gboolean           auto_maybe_mbim = FALSE;
+    gboolean           auto_maybe_at = FALSE;
+    gboolean           auto_maybe_qcdm = FALSE;
+    gboolean           auto_ignored = FALSE;
+
+#define ADD_HINT_FROM_UDEV_TAG(TAG, FIELD) do {                                 \
+        if (!self->priv->FIELD &&                                               \
+            mm_kernel_device_get_property_as_boolean (self->priv->port, TAG)) { \
+            mm_obj_dbg (self, "port type hint detected in udev tag: %s", TAG);  \
+            self->priv->FIELD = TRUE;                                           \
+            n_udev_hints++;                                                     \
+            if (!udev_tags)                                                     \
+                udev_tags = g_string_new (TAG);                                 \
+            else                                                                \
+                g_string_append_printf (udev_tags, ", %s", TAG);                \
+        }                                                                       \
+    } while (0)
+
+    /* Process udev-configured port type hints */
+    ADD_HINT_FROM_UDEV_TAG (ID_MM_PORT_TYPE_GPS,           is_gps);
+    ADD_HINT_FROM_UDEV_TAG (ID_MM_PORT_TYPE_AUDIO,         is_audio);
+    ADD_HINT_FROM_UDEV_TAG (ID_MM_PORT_TYPE_AT_PRIMARY,    maybe_at);
+    ADD_HINT_FROM_UDEV_TAG (ID_MM_PORT_TYPE_AT_SECONDARY,  maybe_at);
+    ADD_HINT_FROM_UDEV_TAG (ID_MM_PORT_TYPE_AT_PPP,        maybe_at);
+    ADD_HINT_FROM_UDEV_TAG (ID_MM_PORT_TYPE_QCDM,          maybe_qcdm);
+    ADD_HINT_FROM_UDEV_TAG (ID_MM_PORT_TYPE_QMI,           maybe_qmi);
+    ADD_HINT_FROM_UDEV_TAG (ID_MM_PORT_TYPE_MBIM,          maybe_mbim);
+
+    /* Warn if more than one given at the same time */
+    if (n_udev_hints > 1)
+        mm_obj_warn (self, "multiple incompatible port type hints configured via udev: %s", udev_tags->str);
+
+    /* Process automatic port type hints, and warn if the hint doesn't match the
+     * one provided via udev. The udev-provided hints are always preferred. */
+    if (!g_strcmp0 (mm_kernel_device_get_subsystem (self->priv->port), "usbmisc")) {
+        const gchar *driver;
+
+        driver = mm_kernel_device_get_driver (self->priv->port);
+        if (!g_strcmp0 (driver, "qmi_wwan")) {
+            mm_obj_dbg (self, "port may be QMI based on the driver in use");
+            auto_maybe_qmi = TRUE;
+        } else if (!g_strcmp0 (driver, "cdc_mbim")) {
+            mm_obj_dbg (self, "port may be MBIM based on the driver in use");
+            auto_maybe_mbim = TRUE;
+        } else {
+            mm_obj_dbg (self, "port may be AT based on the driver in use: %s", driver);
+            auto_maybe_at = TRUE;
+        }
+    } else if (!g_strcmp0 (mm_kernel_device_get_subsystem (self->priv->port), "wwan")) {
+        /* Linux >= 5.14 has at 'type' attribute specifying the type of port */
+        if (mm_kernel_device_has_attribute (self->priv->port, "type")) {
+            const gchar *type;
+
+            type = mm_kernel_device_get_attribute (self->priv->port, "type");
+            if (!g_strcmp0 (type, "AT")) {
+                mm_obj_dbg (self, "port may be AT based on the wwan type attribute");
+                auto_maybe_at = TRUE;
+            } else if (!g_strcmp0 (type, "MBIM")) {
+                mm_obj_dbg (self, "port may be MBIM based on the wwan type attribute");
+                auto_maybe_mbim = TRUE;
+            } else if (!g_strcmp0 (type, "QMI")) {
+                mm_obj_dbg (self, "port may be QMI based on the wwan type attribute");
+                auto_maybe_qmi = TRUE;
+            } else if (!g_strcmp0 (type, "QCDM")) {
+                mm_obj_dbg (self, "port may be QCDM based on the wwan type attribute");
+                auto_maybe_qcdm = TRUE;
+            } else if (!g_strcmp0 (type, "FIREHOSE")) {
+                mm_obj_dbg (self, "port may be FIREHOSE based on the wwan type attribute");
+                auto_ignored = TRUE;
+            }
+        }
+        /* Linux 5.13 does not have 'type' attribute yet, match kernel name instead */
+        else {
+            const gchar *name;
+
+            name = mm_kernel_device_get_name (self->priv->port);
+            if (g_str_has_suffix (name, "AT")) {
+                mm_obj_dbg (self, "port may be AT based on the wwan device name");
+                auto_maybe_at = TRUE;
+            } else if (g_str_has_suffix (name, "MBIM")) {
+                mm_obj_dbg (self, "port may be MBIM based on the wwan device name");
+                auto_maybe_mbim = TRUE;
+            } else if (g_str_has_suffix (name, "QMI")) {
+                mm_obj_dbg (self, "port may be QMI based on the wwan device name");
+                auto_maybe_qmi = TRUE;
+            } else if (g_str_has_suffix (name, "QCDM")) {
+                mm_obj_dbg (self, "port may be QCDM based on the wwan device name");
+                auto_maybe_qcdm = TRUE;
+            } else if (g_str_has_suffix (name, "FIREHOSE")) {
+                mm_obj_dbg (self, "port may be FIREHOSE based on the wwan device name");
+                auto_ignored = TRUE;
+            }
+        }
+    }
+
+    g_assert ((auto_maybe_qmi + auto_maybe_mbim + auto_maybe_at + auto_maybe_qcdm + auto_ignored) <= 1);
+
+#define PROCESS_AUTO_HINTS(TYPE, FIELD) do {                            \
+        if (auto_##FIELD) {                                             \
+            if (n_udev_hints > 0 && !self->priv->FIELD)                 \
+                mm_obj_warn (self, "overriding type in possible " TYPE " port with udev tag: %s", udev_tags->str); \
+            else                                                        \
+                self->priv->FIELD = TRUE;                               \
+        }                                                               \
+    } while (0)
+
+    PROCESS_AUTO_HINTS ("QMI",  maybe_qmi);
+    PROCESS_AUTO_HINTS ("MBIM", maybe_mbim);
+    PROCESS_AUTO_HINTS ("AT",   maybe_at);
+    PROCESS_AUTO_HINTS ("QCDM", maybe_qcdm);
+
+#undef PROCESS_AUTO_HINTS
+
+    mm_obj_dbg (self, "port type hints loaded: AT %s, QMI %s, MBIM %s, QCDM %s, AUDIO %s, GPS %s",
+                self->priv->maybe_at ? "yes" : "no",
+                self->priv->maybe_qmi ? "yes" : "no",
+                self->priv->maybe_mbim ? "yes" : "no",
+                self->priv->maybe_qcdm ? "yes" : "no",
+                self->priv->is_audio ? "yes" : "no",
+                self->priv->is_gps ? "yes" : "no");
+
+    /* Regardless of the type, the port may be ignored */
+    if (mm_kernel_device_get_property_as_boolean (self->priv->port, ID_MM_PORT_IGNORE)) {
+        mm_obj_dbg (self, "port is ignored via udev tag");
+        self->priv->is_ignored = TRUE;
+    } else if (auto_ignored) {
+        mm_obj_dbg (self, "port is ignored via automatic rules");
+        self->priv->is_ignored = TRUE;
+    }
+}
+
 /*****************************************************************************/
 
 static gchar *
@@ -1894,15 +2029,7 @@ set_property (GObject *object,
     case PROP_PORT:
         /* construct only */
         self->priv->port = g_value_dup_object (value);
-        self->priv->is_ignored = mm_kernel_device_get_property_as_boolean (self->priv->port, ID_MM_PORT_IGNORE);
-        self->priv->is_gps = mm_kernel_device_get_property_as_boolean (self->priv->port, ID_MM_PORT_TYPE_GPS);
-        self->priv->is_audio = mm_kernel_device_get_property_as_boolean (self->priv->port, ID_MM_PORT_TYPE_AUDIO);
-        self->priv->maybe_at_primary = mm_kernel_device_get_property_as_boolean (self->priv->port, ID_MM_PORT_TYPE_AT_PRIMARY);
-        self->priv->maybe_at_secondary = mm_kernel_device_get_property_as_boolean (self->priv->port, ID_MM_PORT_TYPE_AT_SECONDARY);
-        self->priv->maybe_at_ppp = mm_kernel_device_get_property_as_boolean (self->priv->port, ID_MM_PORT_TYPE_AT_PPP);
-        self->priv->maybe_qcdm = mm_kernel_device_get_property_as_boolean (self->priv->port, ID_MM_PORT_TYPE_QCDM);
-        self->priv->maybe_qmi = mm_kernel_device_get_property_as_boolean (self->priv->port, ID_MM_PORT_TYPE_QMI);
-        self->priv->maybe_mbim = mm_kernel_device_get_property_as_boolean (self->priv->port, ID_MM_PORT_TYPE_MBIM);
+        initialize_port_type_hints (self);
         break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
