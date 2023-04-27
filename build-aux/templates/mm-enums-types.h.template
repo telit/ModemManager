@@ -14,18 +14,15 @@ G_BEGIN_DECLS
 GType @enum_name@_get_type (void) G_GNUC_CONST;
 #define @ENUMPREFIX@_TYPE_@ENUMSHORT@ (@enum_name@_get_type ())
 
-/* Define type-specific symbols */
-#undef __MM_IS_ENUM__
-#undef __MM_IS_FLAGS__
-#define __MM_IS_@TYPE@__
-
-#if defined __MM_IS_ENUM__
+/**
+ * @enum_name@_get_string:
+ * @val: a @EnumName@.
+ *
+ * Gets the nickname string for the #@EnumName@ specified at @val.
+ *
+ * Returns: (transfer none): a string with the nickname, or %NULL if not found. Do not free the returned value.
+ */
 const gchar *@enum_name@_get_string (@EnumName@ val);
-#endif
-
-#if defined __MM_IS_FLAGS__
-gchar *@enum_name@_build_string_from_mask (@EnumName@ mask);
-#endif
 
 /*** END value-header ***/
 

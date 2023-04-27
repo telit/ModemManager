@@ -16,11 +16,6 @@ static const G@Type@Value @enum_name@_values[] = {
     { 0, NULL, NULL }
 };
 
-/* Define type-specific symbols */
-#undef __MM_IS_ENUM__
-#undef __MM_IS_FLAGS__
-#define __MM_IS_@TYPE@__
-
 GType
 @enum_name@_get_type (void)
 {
@@ -36,15 +31,7 @@ GType
     return g_define_type_id_initialized;
 }
 
-/**
- * @enum_name@_get_string:
- * @val: a @EnumName@.
- *
- * Gets the nickname string for the #@EnumName@ specified at @val.
- *
- * Returns: (transfer none): a string with the nickname, or %NULL if not found. Do not free the returned value.
- */
-#if defined __MM_IS_ENUM__
+#if defined __@ENUMNAME@_IS_ENUM__
 const gchar *
 @enum_name@_get_string (@EnumName@ val)
 {
@@ -57,18 +44,9 @@ const gchar *
 
     return NULL;
 }
-#endif /* __MM_IS_ENUM_ */
+#endif
 
-/**
- * @enum_name@_build_string_from_mask:
- * @mask: bitmask of @EnumName@ values.
- *
- * Builds a string containing a comma-separated list of nicknames for
- * each #@EnumName@ in @mask.
- *
- * Returns: (transfer full): a string with the list of nicknames, or %NULL if none given. The returned value should be freed with g_free().
- */
-#if defined __MM_IS_FLAGS__
+#if defined __@ENUMNAME@_IS_FLAGS__
 gchar *
 @enum_name@_build_string_from_mask (@EnumName@ mask)
 {
@@ -106,7 +84,7 @@ gchar *
 
     return (str ? g_string_free (str, FALSE) : NULL);
 }
-#endif /* __MM_IS_FLAGS__ */
+#endif
 
 /*** END value-tail ***/
 
