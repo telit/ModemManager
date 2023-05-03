@@ -210,8 +210,8 @@ register_in_network_cancelled (GCancellable *cancellable,
     ctx = g_task_get_task_data (task);
 
     g_assert (ctx->cancellable);
-    g_assert (ctx->cancellable_id);
-    ctx->cancellable_id = 0;
+    if (ctx->cancellable_id)
+        ctx->cancellable_id = 0;
 
     g_assert (ctx->timeout_id);
     g_source_remove (ctx->timeout_id);
@@ -241,9 +241,10 @@ register_in_network_timeout (GTask *task)
     g_signal_handler_disconnect (ctx->client, ctx->serving_system_indication_id);
     ctx->serving_system_indication_id = 0;
 
-    g_assert (!ctx->cancellable || ctx->cancellable_id);
-    g_cancellable_disconnect (ctx->cancellable, ctx->cancellable_id);
-    ctx->cancellable_id = 0;
+    if (ctx->cancellable && ctx->cancellable_id) {
+        g_cancellable_disconnect (ctx->cancellable, ctx->cancellable_id);
+        ctx->cancellable_id = 0;
+    }
 
     /* the 3GPP interface will take care of checking if the registration is
      * the one we asked for */
@@ -283,9 +284,10 @@ register_in_network_ready (GTask                               *task,
     g_source_remove (ctx->timeout_id);
     ctx->timeout_id = 0;
 
-    g_assert (!ctx->cancellable || ctx->cancellable_id);
-    g_cancellable_disconnect (ctx->cancellable, ctx->cancellable_id);
-    ctx->cancellable_id = 0;
+    if (ctx->cancellable && ctx->cancellable_id) {
+        g_cancellable_disconnect (ctx->cancellable, ctx->cancellable_id);
+        ctx->cancellable_id = 0;
+    }
 
     /* the 3GPP interface will take care of checking if the registration is
      * the one we asked for */
@@ -330,12 +332,6 @@ initiate_network_register_ready (QmiClientNas *client,
      * will cancel the others.
      */
 
-    if (ctx->cancellable)
-        ctx->cancellable_id = g_cancellable_connect (ctx->cancellable,
-                                                     G_CALLBACK (register_in_network_cancelled),
-                                                     task,
-                                                     NULL);
-
     ctx->serving_system_indication_id = g_signal_connect_swapped (client,
                                                                   "serving-system",
                                                                   G_CALLBACK (register_in_network_ready),
@@ -344,6 +340,15 @@ initiate_network_register_ready (QmiClientNas *client,
     ctx->timeout_id = g_timeout_add_seconds (REGISTER_IN_NETWORK_TIMEOUT_SECS,
                                              (GSourceFunc) register_in_network_timeout,
                                              task);
+
+    /* The cancellable may already be cancelled, and if so the given callback will be called
+     * right away. So make sure this cancellable is always configured last, so that it clears the
+     * timeout or signal handler upon early cancellation. */
+    if (ctx->cancellable)
+        ctx->cancellable_id = g_cancellable_connect (ctx->cancellable,
+                                                     G_CALLBACK (register_in_network_cancelled),
+                                                     task,
+                                                     NULL);
 
 out:
 

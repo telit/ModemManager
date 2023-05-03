@@ -11235,6 +11235,7 @@ schedule_initial_registration_checks (MMBroadbandModem *self)
 typedef enum {
     /* When user requests a disable operation, the process starts here */
     DISABLING_STEP_FIRST,
+    DISABLING_STEP_IFACE_SIMPLE_ABORT_ONGOING,
     DISABLING_STEP_WAIT_FOR_FINAL_STATE,
     DISABLING_STEP_DISCONNECT_BEARERS,
     /* When the disabling is launched due to a failed enable, the process
@@ -11339,14 +11340,14 @@ INTERFACE_DISABLE_READY_FN (iface_modem_time,                 MM_IFACE_MODEM_TIM
 INTERFACE_DISABLE_READY_FN (iface_modem_oma,                  MM_IFACE_MODEM_OMA,                  FALSE)
 
 static void
-bearer_list_disconnect_all_bearers_ready (MMBearerList *list,
-                                          GAsyncResult *res,
-                                          GTask *task)
+bearer_list_disconnect_bearers_ready (MMBearerList *list,
+                                      GAsyncResult *res,
+                                      GTask        *task)
 {
     DisablingContext *ctx;
-    GError *error = NULL;
+    GError           *error = NULL;
 
-    if (!mm_bearer_list_disconnect_all_bearers_finish (list, res, &error)) {
+    if (!mm_bearer_list_disconnect_bearers_finish (list, res, &error)) {
         g_task_return_error (task, error);
         g_object_unref (task);
         return;
@@ -11423,6 +11424,14 @@ disabling_step (GTask *task)
         ctx->step++;
         /* fall through */
 
+    case DISABLING_STEP_IFACE_SIMPLE_ABORT_ONGOING:
+        /* Connection requests via the Simple interface must be aborted as soon
+         * as possible, because certain steps may be explicitly waiting for new
+         * state transitions and such. */
+        mm_iface_modem_simple_abort_ongoing (MM_IFACE_MODEM_SIMPLE (ctx->self));
+        ctx->step++;
+        /* fall through */
+
     case DISABLING_STEP_WAIT_FOR_FINAL_STATE:
         /* cancellability allowed at this point */
         if (g_task_return_error_if_cancelled (task)) {
@@ -11442,9 +11451,10 @@ disabling_step (GTask *task)
             return;
         }
         if (ctx->self->priv->modem_bearer_list) {
-            mm_bearer_list_disconnect_all_bearers (
+            mm_bearer_list_disconnect_bearers (
                 ctx->self->priv->modem_bearer_list,
-                (GAsyncReadyCallback)bearer_list_disconnect_all_bearers_ready,
+                NULL, /* all bearers */
+                (GAsyncReadyCallback)bearer_list_disconnect_bearers_ready,
                 task);
             return;
         }

@@ -106,6 +106,20 @@ enum {
     PROP_LAST
 };
 
+/* Runtime cache while enabled */
+typedef struct {
+    gchar                   *current_operator_id;
+    gchar                   *current_operator_name;
+    GList                   *pco_list;
+    MbimDataClass            available_data_classes;
+    MbimDataClass            highest_available_data_class;
+    MbimRegisterState        reg_state;
+    MbimPacketServiceState   packet_service_state;
+    guint64                  packet_service_uplink_speed;
+    guint64                  packet_service_downlink_speed;
+    MbimSubscriberReadyState last_ready_state;
+} EnabledCache;
+
 struct _MMBroadbandModemMbimPrivate {
     /* Queried and cached capabilities */
     MbimCellularClass caps_cellular_class;
@@ -137,31 +151,22 @@ struct _MMBroadbandModemMbimPrivate {
     ProcessNotificationFlag setup_flags;
     ProcessNotificationFlag enable_flags;
 
-    GList *pco_list;
+    /* State while enabled */
+    EnabledCache enabled_cache;
 
     /* 3GPP registration helpers */
-    gchar         *current_operator_id;
-    gchar         *current_operator_name;
+    gulong         enabling_signal_id;
     gchar         *requested_operator_id;
     MbimDataClass  requested_data_class; /* 0 for defaults/auto */
-    GTask         *pending_allowed_modes_action;
-    gulong         enabling_signal_id;
+
+    /* Allowed modes helpers */
+    GTask *pending_allowed_modes_action;
 
     /* USSD helpers */
     GTask *pending_ussd_action;
 
     /* SIM hot swap setup */
     gboolean sim_hot_swap_configured;
-
-    /* Access technology and registration updates */
-    MbimDataClass available_data_classes;
-    MbimDataClass highest_available_data_class;
-    MbimRegisterState reg_state;
-    MbimPacketServiceState packet_service_state;
-    guint64 packet_service_uplink_speed;
-    guint64 packet_service_downlink_speed;
-
-    MbimSubscriberReadyState last_ready_state;
 
     /* For notifying when the mbim-proxy connection is dead */
     gulong mbim_device_removed_id;
@@ -1585,7 +1590,7 @@ unlock_required_subscriber_ready_state_ready (MbimDevice   *device,
     self = g_task_get_source_object (task);
 
     /* reset to the default if any error happens */
-    self->priv->last_ready_state = MBIM_SUBSCRIBER_READY_STATE_NOT_INITIALIZED;
+    self->priv->enabled_cache.last_ready_state = MBIM_SUBSCRIBER_READY_STATE_NOT_INITIALIZED;
 
     response = mbim_device_command_finish (device, res, &error);
     if (!response || !mbim_message_response_get_result (response, MBIM_MESSAGE_TYPE_COMMAND_DONE, &error)) {
@@ -1625,7 +1630,7 @@ unlock_required_subscriber_ready_state_ready (MbimDevice   *device,
 
     if (!error) {
         /* Store last valid status loaded */
-        self->priv->last_ready_state = ready_state;
+        self->priv->enabled_cache.last_ready_state = ready_state;
 
         switch (ready_state) {
         case MBIM_SUBSCRIBER_READY_STATE_NOT_INITIALIZED:
@@ -2204,9 +2209,9 @@ signal_state_query_ready (MbimDevice   *device,
         g_task_return_error (task, error);
     else {
         /* Best guess of current data class */
-        data_class = self->priv->highest_available_data_class;
+        data_class = self->priv->enabled_cache.highest_available_data_class;
         if (data_class == 0)
-            data_class = self->priv->available_data_classes;
+            data_class = self->priv->enabled_cache.available_data_classes;
         if (mm_signal_from_mbim_signal_state (data_class, rssi, error_rate, rsrp_snr, rsrp_snr_count,
                                               self, &cdma, &evdo, &gsm, &umts, &lte, &nr5g))
             mm_iface_modem_signal_update (MM_IFACE_MODEM_SIGNAL (self), cdma, evdo, gsm, umts, lte, nr5g);
@@ -4553,9 +4558,9 @@ basic_connect_notification_signal_state (MMBroadbandModemMbim *self,
     mm_iface_modem_update_signal_quality (MM_IFACE_MODEM (self), quality);
 
     /* Best guess of current data class */
-    data_class = self->priv->highest_available_data_class;
+    data_class = self->priv->enabled_cache.highest_available_data_class;
     if (data_class == 0)
-        data_class = self->priv->available_data_classes;
+        data_class = self->priv->enabled_cache.available_data_classes;
 
     if (mm_signal_from_mbim_signal_state (data_class, coded_rssi, coded_error_rate, rsrp_snr, rsrp_snr_count,
                                           self, &cdma, &evdo, &gsm, &umts, &lte, &nr5g))
@@ -4620,15 +4625,15 @@ update_access_technologies (MMBroadbandModemMbim *self)
 {
     MMModemAccessTechnology act;
 
-    act = mm_modem_access_technology_from_mbim_data_class (self->priv->highest_available_data_class);
+    act = mm_modem_access_technology_from_mbim_data_class (self->priv->enabled_cache.highest_available_data_class);
     if (act == MM_MODEM_ACCESS_TECHNOLOGY_UNKNOWN)
-        act = mm_modem_access_technology_from_mbim_data_class (self->priv->available_data_classes);
+        act = mm_modem_access_technology_from_mbim_data_class (self->priv->enabled_cache.available_data_classes);
 
     mm_iface_modem_3gpp_update_access_technologies (MM_IFACE_MODEM_3GPP (self), act);
 }
 
 /*****************************************************************************/
-/* Registration info updates */
+/* Packet service updates */
 
 static void update_registration_info (MMBroadbandModemMbim *self,
                                       gboolean              scheduled,
@@ -4636,6 +4641,31 @@ static void update_registration_info (MMBroadbandModemMbim *self,
                                       MbimDataClass         available_data_classes,
                                       gchar                *operator_id_take,
                                       gchar                *operator_name_take);
+
+static void
+update_packet_service_info (MMBroadbandModemMbim    *self,
+                            MbimPacketServiceState   packet_service_state)
+{
+    MMModem3gppPacketServiceState state;
+
+    if (packet_service_state == self->priv->enabled_cache.packet_service_state)
+        return;
+
+    self->priv->enabled_cache.packet_service_state = packet_service_state;
+    state = mm_modem_3gpp_packet_service_state_from_mbim_packet_service_state (packet_service_state);
+    mm_iface_modem_3gpp_update_packet_service_state (MM_IFACE_MODEM_3GPP (self), state);
+
+    /* PS reg state depends on the packet service state */
+    update_registration_info (self,
+                              FALSE,
+                              self->priv->enabled_cache.reg_state,
+                              self->priv->enabled_cache.available_data_classes,
+                              g_strdup (self->priv->enabled_cache.current_operator_id),
+                              g_strdup (self->priv->enabled_cache.current_operator_name));
+}
+
+/*****************************************************************************/
+/* Registration info updates */
 
 static void
 enabling_state_changed (MMBroadbandModemMbim *self)
@@ -4649,10 +4679,10 @@ enabling_state_changed (MMBroadbandModemMbim *self)
         mm_obj_dbg (self, "triggering 3GPP registration info update");
         update_registration_info (self,
                                   TRUE,
-                                  self->priv->reg_state,
-                                  self->priv->available_data_classes,
-                                  g_strdup (self->priv->current_operator_id),
-                                  g_strdup (self->priv->current_operator_name));
+                                  self->priv->enabled_cache.reg_state,
+                                  self->priv->enabled_cache.available_data_classes,
+                                  g_strdup (self->priv->enabled_cache.current_operator_id),
+                                  g_strdup (self->priv->enabled_cache.current_operator_name));
     }
     /* if something bad happened during enabling, we can ignore any pending
      * registration info update */
@@ -4688,36 +4718,38 @@ update_registration_info (MMBroadbandModemMbim *self,
     if (modem_state == MM_MODEM_STATE_ENABLING)
         schedule_update_in_enabled = TRUE;
 
-    if (self->priv->reg_state != state)
+    if (self->priv->enabled_cache.reg_state != state)
         reg_state_updated = TRUE;
-    self->priv->reg_state = state;
+    self->priv->enabled_cache.reg_state = state;
 
     reg_state = mm_modem_3gpp_registration_state_from_mbim_register_state (state);
 
     if (reg_state == MM_MODEM_3GPP_REGISTRATION_STATE_HOME ||
         reg_state == MM_MODEM_3GPP_REGISTRATION_STATE_ROAMING) {
-        if (self->priv->current_operator_id && operator_id_take &&
-            g_str_equal (self->priv->current_operator_id, operator_id_take)) {
+        if (self->priv->enabled_cache.current_operator_id && operator_id_take &&
+            g_str_equal (self->priv->enabled_cache.current_operator_id, operator_id_take)) {
             g_free (operator_id_take);
         } else {
             operator_updated = TRUE;
-            g_free (self->priv->current_operator_id);
-            self->priv->current_operator_id = operator_id_take;
+            g_free (self->priv->enabled_cache.current_operator_id);
+            self->priv->enabled_cache.current_operator_id = operator_id_take;
         }
 
-        if (self->priv->current_operator_name && operator_name_take &&
-            g_str_equal (self->priv->current_operator_name, operator_name_take)) {
+        if (self->priv->enabled_cache.current_operator_name && operator_name_take &&
+            g_str_equal (self->priv->enabled_cache.current_operator_name, operator_name_take)) {
             g_free (operator_name_take);
         } else {
             operator_updated = TRUE;
-            g_free (self->priv->current_operator_name);
-            self->priv->current_operator_name = operator_name_take;
+            g_free (self->priv->enabled_cache.current_operator_name);
+            self->priv->enabled_cache.current_operator_name = operator_name_take;
         }
     } else {
-        if (self->priv->current_operator_id || self->priv->current_operator_name)
+        if (self->priv->enabled_cache.current_operator_id ||
+            self->priv->enabled_cache.current_operator_name) {
             operator_updated = TRUE;
-        g_clear_pointer (&self->priv->current_operator_id, g_free);
-        g_clear_pointer (&self->priv->current_operator_name, g_free);
+        }
+        g_clear_pointer (&self->priv->enabled_cache.current_operator_id, g_free);
+        g_clear_pointer (&self->priv->enabled_cache.current_operator_name, g_free);
         g_free (operator_id_take);
         g_free (operator_name_take);
     }
@@ -4732,7 +4764,7 @@ update_registration_info (MMBroadbandModemMbim *self,
         if (available_data_classes & (MBIM_DATA_CLASS_GPRS  | MBIM_DATA_CLASS_EDGE  |
                                       MBIM_DATA_CLASS_UMTS  | MBIM_DATA_CLASS_HSDPA | MBIM_DATA_CLASS_HSUPA)) {
             reg_state_cs = reg_state;
-            if (self->priv->packet_service_state == MBIM_PACKET_SERVICE_STATE_ATTACHED)
+            if (self->priv->enabled_cache.packet_service_state == MBIM_PACKET_SERVICE_STATE_ATTACHED)
                 reg_state_ps = reg_state;
         }
 
@@ -4756,14 +4788,16 @@ update_registration_info (MMBroadbandModemMbim *self,
             mm_iface_modem_3gpp_reload_current_registration_info (MM_IFACE_MODEM_3GPP (self), NULL, NULL);
     }
 
-    self->priv->available_data_classes = available_data_classes;
+    self->priv->enabled_cache.available_data_classes = available_data_classes;
     /* If we can update access technologies right now, do it */
     if (!schedule_update_in_enabled)
         update_access_technologies (self);
 
     /* request to reload location info */
-    if (!schedule_update_in_enabled && self->priv->is_atds_location_supported && (reg_state_updated || scheduled)) {
-        if (self->priv->reg_state < MBIM_REGISTER_STATE_HOME) {
+    if (!schedule_update_in_enabled &&
+        self->priv->is_atds_location_supported &&
+        (reg_state_updated || scheduled)) {
+        if (self->priv->enabled_cache.reg_state < MBIM_REGISTER_STATE_HOME) {
             mm_iface_modem_3gpp_update_location (MM_IFACE_MODEM_3GPP (self), 0, 0, 0);
 
         } else
@@ -4976,25 +5010,25 @@ basic_connect_notification_subscriber_ready_status (MMBroadbandModemMbim *self,
     if (ready_state == MBIM_SUBSCRIBER_READY_STATE_INITIALIZED)
         mm_iface_modem_update_own_numbers (MM_IFACE_MODEM (self), telephone_numbers);
 
-    if ((self->priv->last_ready_state != MBIM_SUBSCRIBER_READY_STATE_NO_ESIM_PROFILE &&
+    if ((self->priv->enabled_cache.last_ready_state != MBIM_SUBSCRIBER_READY_STATE_NO_ESIM_PROFILE &&
          ready_state == MBIM_SUBSCRIBER_READY_STATE_NO_ESIM_PROFILE) ||
-        (self->priv->last_ready_state == MBIM_SUBSCRIBER_READY_STATE_NO_ESIM_PROFILE &&
+        (self->priv->enabled_cache.last_ready_state == MBIM_SUBSCRIBER_READY_STATE_NO_ESIM_PROFILE &&
          ready_state != MBIM_SUBSCRIBER_READY_STATE_NO_ESIM_PROFILE)) {
         /* eSIM profiles have been added or removed, re-probe to ensure correct interfaces are exposed */
         mm_obj_dbg (self, "eSIM profile updates detected");
         active_sim_event = TRUE;
     }
 
-    if ((self->priv->last_ready_state != MBIM_SUBSCRIBER_READY_STATE_SIM_NOT_INSERTED &&
+    if ((self->priv->enabled_cache.last_ready_state != MBIM_SUBSCRIBER_READY_STATE_SIM_NOT_INSERTED &&
          ready_state == MBIM_SUBSCRIBER_READY_STATE_SIM_NOT_INSERTED) ||
-        (self->priv->last_ready_state == MBIM_SUBSCRIBER_READY_STATE_SIM_NOT_INSERTED &&
+        (self->priv->enabled_cache.last_ready_state == MBIM_SUBSCRIBER_READY_STATE_SIM_NOT_INSERTED &&
          ready_state != MBIM_SUBSCRIBER_READY_STATE_SIM_NOT_INSERTED)) {
         /* SIM has been removed or reinserted, re-probe to ensure correct interfaces are exposed */
         mm_obj_dbg (self, "SIM hot swap detected");
         active_sim_event = TRUE;
     }
 
-    self->priv->last_ready_state = ready_state;
+    self->priv->enabled_cache.last_ready_state = ready_state;
 
     if (active_sim_event) {
         mm_iface_modem_process_sim_event (MM_IFACE_MODEM (self));
@@ -5002,7 +5036,7 @@ basic_connect_notification_subscriber_ready_status (MMBroadbandModemMbim *self,
 }
 
 /*****************************************************************************/
-/* Packet service updates */
+/* Speed updates */
 
 void
 mm_broadband_modem_mbim_get_speeds (MMBroadbandModemMbim *self,
@@ -5010,9 +5044,9 @@ mm_broadband_modem_mbim_get_speeds (MMBroadbandModemMbim *self,
                                     guint64              *downlink_speed)
 {
     if (uplink_speed)
-        *uplink_speed = self->priv->packet_service_uplink_speed;
+        *uplink_speed = self->priv->enabled_cache.packet_service_uplink_speed;
     if (downlink_speed)
-        *downlink_speed = self->priv->packet_service_downlink_speed;
+        *downlink_speed = self->priv->enabled_cache.packet_service_downlink_speed;
 }
 
 static void
@@ -5024,9 +5058,37 @@ bearer_list_report_speeds (MMBaseBearer         *bearer,
 
     mm_obj_dbg (self, "bearer '%s' speeds updated", mm_base_bearer_get_path (bearer));
     mm_base_bearer_report_speeds (bearer,
-                                  self->priv->packet_service_uplink_speed,
-                                  self->priv->packet_service_downlink_speed);
+                                  self->priv->enabled_cache.packet_service_uplink_speed,
+                                  self->priv->enabled_cache.packet_service_downlink_speed);
 }
+
+static void
+update_bearer_speeds (MMBroadbandModemMbim *self,
+                      guint64               uplink_speed,
+                      guint64               downlink_speed)
+{
+    g_autoptr(MMBearerList) bearer_list = NULL;
+
+    if ((self->priv->enabled_cache.packet_service_uplink_speed == uplink_speed) &&
+        (self->priv->enabled_cache.packet_service_downlink_speed == downlink_speed))
+        return;
+
+    self->priv->enabled_cache.packet_service_uplink_speed = uplink_speed;
+    self->priv->enabled_cache.packet_service_downlink_speed = downlink_speed;
+
+    g_object_get (self,
+                  MM_IFACE_MODEM_BEARER_LIST, &bearer_list,
+                  NULL);
+    if (!bearer_list)
+        return;
+
+    mm_bearer_list_foreach (bearer_list,
+                            (MMBearerListForeachFunc)bearer_list_report_speeds,
+                            self);
+}
+
+/*****************************************************************************/
+/* Packet service updates */
 
 static void
 basic_connect_notification_packet_service (MMBroadbandModemMbim *self,
@@ -5047,7 +5109,6 @@ basic_connect_notification_packet_service (MMBroadbandModemMbim *self,
     g_autofree gchar       *frequency_range_str = NULL;
     const gchar            *nw_error_str;
     g_autoptr(GError)       error = NULL;
-    g_autoptr(MMBearerList) bearer_list = NULL;
 
     if (mbim_device_check_ms_mbimex_version (device, 3, 0)) {
         if (!mbim_message_ms_basic_connect_v3_packet_service_notification_parse (
@@ -5119,33 +5180,17 @@ basic_connect_notification_packet_service (MMBroadbandModemMbim *self,
 
     if (packet_service_state == MBIM_PACKET_SERVICE_STATE_ATTACHED) {
         if (data_class_v3)
-            self->priv->highest_available_data_class = mm_mbim_data_class_from_mbim_data_class_v3_and_subclass (data_class_v3, data_subclass);
+            self->priv->enabled_cache.highest_available_data_class = mm_mbim_data_class_from_mbim_data_class_v3_and_subclass (data_class_v3, data_subclass);
         else
-            self->priv->highest_available_data_class = data_class;
+            self->priv->enabled_cache.highest_available_data_class = data_class;
     } else if (packet_service_state == MBIM_PACKET_SERVICE_STATE_DETACHED) {
-        self->priv->highest_available_data_class = 0;
+        self->priv->enabled_cache.highest_available_data_class = 0;
     }
     update_access_technologies (self);
 
-    if (self->priv->packet_service_state != packet_service_state) {
-        self->priv->packet_service_state = packet_service_state;
-        update_registration_info (self,
-                                  FALSE,
-                                  self->priv->reg_state,
-                                  self->priv->available_data_classes,
-                                  g_strdup (self->priv->current_operator_id),
-                                  g_strdup (self->priv->current_operator_name));
-    }
+    update_packet_service_info (self, packet_service_state);
 
-    self->priv->packet_service_uplink_speed = uplink_speed;
-    self->priv->packet_service_downlink_speed = downlink_speed;
-    g_object_get (self,
-                  MM_IFACE_MODEM_BEARER_LIST, &bearer_list,
-                  NULL);
-    if (bearer_list)
-        mm_bearer_list_foreach (bearer_list,
-                                (MMBearerListForeachFunc)bearer_list_report_speeds,
-                                self);
+    update_bearer_speeds (self, uplink_speed, downlink_speed);
 }
 
 static void
@@ -5357,9 +5402,9 @@ ms_basic_connect_extensions_notification_pco (MMBroadbandModemMbim *self,
                      pco_value->pco_data_buffer,
                      pco_value->pco_data_size);
 
-    self->priv->pco_list = mm_pco_list_add (self->priv->pco_list, pco);
+    self->priv->enabled_cache.pco_list = mm_pco_list_add (self->priv->enabled_cache.pco_list, pco);
     mm_iface_modem_3gpp_update_pco_list (MM_IFACE_MODEM_3GPP (self),
-                                         self->priv->pco_list);
+                                         self->priv->enabled_cache.pco_list);
     g_object_unref (pco);
     mbim_pco_value_free (pco_value);
 }
@@ -5689,6 +5734,27 @@ common_setup_cleanup_unsolicited_events_3gpp_finish (MMIfaceModem3gpp *self,
 }
 
 static void
+cleanup_enabled_cache (MMBroadbandModemMbim *self)
+{
+    g_clear_pointer (&self->priv->enabled_cache.current_operator_id, g_free);
+    g_clear_pointer (&self->priv->enabled_cache.current_operator_name, g_free);
+    g_list_free_full (self->priv->enabled_cache.pco_list, g_object_unref);
+    self->priv->enabled_cache.pco_list = NULL;
+    self->priv->enabled_cache.available_data_classes = MBIM_DATA_CLASS_NONE;
+    self->priv->enabled_cache.highest_available_data_class = MBIM_DATA_CLASS_NONE;
+    self->priv->enabled_cache.reg_state = MBIM_REGISTER_STATE_UNKNOWN;
+    self->priv->enabled_cache.packet_service_state = MBIM_PACKET_SERVICE_STATE_UNKNOWN;
+    self->priv->enabled_cache.packet_service_uplink_speed = 0;
+    self->priv->enabled_cache.packet_service_downlink_speed = 0;
+
+    /* NOTE: FLAG_SUBSCRIBER_INFO is managed both via 3GPP unsolicited
+     * events and via SIM hot swap setup. We only reset the last ready state
+     * if SIM hot swap context is not using it. */
+    if (!self->priv->sim_hot_swap_configured)
+        self->priv->enabled_cache.last_ready_state = MBIM_SUBSCRIBER_READY_STATE_NOT_INITIALIZED;
+}
+
+static void
 cleanup_unsolicited_events_3gpp (MMIfaceModem3gpp *_self,
                                  GAsyncReadyCallback callback,
                                  gpointer user_data)
@@ -5711,6 +5777,9 @@ cleanup_unsolicited_events_3gpp (MMIfaceModem3gpp *_self,
     if (self->priv->is_slot_info_status_supported)
         self->priv->setup_flags &= ~PROCESS_NOTIFICATION_FLAG_SLOT_INFO_STATUS;
     common_setup_cleanup_unsolicited_events (self, FALSE, callback, user_data);
+
+    /* Runtime cached state while enabled, to be cleaned up once disabled */
+    cleanup_enabled_cache (self);
 }
 
 static void
@@ -6157,9 +6226,9 @@ modem_3gpp_load_operator_name (MMIfaceModem3gpp *_self,
     GTask *task;
 
     task = g_task_new (self, NULL, callback, user_data);
-    if (self->priv->current_operator_name)
+    if (self->priv->enabled_cache.current_operator_name)
         g_task_return_pointer (task,
-                               g_strdup (self->priv->current_operator_name),
+                               g_strdup (self->priv->enabled_cache.current_operator_name),
                                g_free);
     else
         g_task_return_new_error (task,
@@ -6189,9 +6258,9 @@ modem_3gpp_load_operator_code (MMIfaceModem3gpp *_self,
     GTask *task;
 
     task = g_task_new (self, NULL, callback, user_data);
-    if (self->priv->current_operator_id)
+    if (self->priv->enabled_cache.current_operator_id)
         g_task_return_pointer (task,
-                               g_strdup (self->priv->current_operator_id),
+                               g_strdup (self->priv->enabled_cache.current_operator_id),
                                g_free);
     else
         g_task_return_new_error (task,
@@ -6333,13 +6402,12 @@ register_state_set_ready (MbimDevice *device,
                           GAsyncResult *res,
                           GTask *task)
 {
-    MMBroadbandModemMbim *self;
-    MbimMessage          *response;
-    GError               *error = NULL;
+    MMBroadbandModemMbim   *self;
+    g_autoptr(MbimMessage)  response = NULL;
+    GError                 *error = NULL;
 
     self = g_task_get_source_object (task);
 
-    response = mbim_device_command_finish (device, res, &error);
     /* According to Mobile Broadband Interface Model specification 1.0,
      * Errata 1, table 10.5.9.8: Status codes for MBIM_CID_REGISTER_STATE,
      * NwError field of MBIM_REGISTRATION_STATE_INFO structure is valid
@@ -6350,9 +6418,8 @@ register_state_set_ready (MbimDevice *device,
      * However, some modems do not set this value to 0 when registered,
      * causing ModemManager to drop to idle state, while modem itself is
      * registered.
-     * Also NwError "0" is defined in 3GPP TS 24.008 as "Unknown error",
-     * not "No error", making it unsuitable as condition for registration check.
      */
+    response = mbim_device_command_finish (device, res, &error);
     if (response &&
         !mbim_message_response_get_result (response,
                                            MBIM_MESSAGE_TYPE_COMMAND_DONE,
@@ -6372,12 +6439,21 @@ register_state_set_ready (MbimDevice *device,
                 NULL, /* provider_name */
                 NULL, /* roaming_text */
                 NULL, /* registration_flag */
-                &error))
-            error = mm_mobile_equipment_error_from_mbim_nw_error (nw_error, self);
+                &error)) {
+            /* NwError "0" is defined in 3GPP TS 24.008 as "Unknown error",
+             * not "No error", making it unsuitable as condition for registration check.
+             * Still, there are certain modems (e.g. Fibocom NL668) that will
+             * report Failure+NwError=0 even after the modem has already reported a
+             * succesful registration via indications after the set operation. If
+             * that is the case, log about it and ignore the error; we are anyway
+             * reloading the registration info after the set, so it should not be
+             * a big issue. */
+            if (nw_error == 0)
+                mm_obj_dbg (self, "ignored failure reported in register operation");
+            else
+                error = mm_mobile_equipment_error_from_mbim_nw_error (nw_error, self);
+        }
     }
-
-    if (response)
-        mbim_message_unref (response);
 
     if (error)
         g_task_return_error (task, error);
@@ -9376,7 +9452,11 @@ mm_broadband_modem_mbim_init (MMBroadbandModemMbim *self)
     self->priv = G_TYPE_INSTANCE_GET_PRIVATE (self,
                                               MM_TYPE_BROADBAND_MODEM_MBIM,
                                               MMBroadbandModemMbimPrivate);
-    self->priv->packet_service_state = MBIM_PACKET_SERVICE_STATE_UNKNOWN;
+    self->priv->enabled_cache.available_data_classes = MBIM_DATA_CLASS_NONE;
+    self->priv->enabled_cache.highest_available_data_class = MBIM_DATA_CLASS_NONE;
+    self->priv->enabled_cache.reg_state = MBIM_REGISTER_STATE_UNKNOWN;
+    self->priv->enabled_cache.packet_service_state = MBIM_PACKET_SERVICE_STATE_UNKNOWN;
+    self->priv->enabled_cache.last_ready_state = MBIM_SUBSCRIBER_READY_STATE_NOT_INITIALIZED;
 }
 
 static void
@@ -9418,10 +9498,10 @@ finalize (GObject *object)
     g_free (self->priv->caps_device_id);
     g_free (self->priv->caps_firmware_info);
     g_free (self->priv->caps_hardware_info);
-    g_free (self->priv->current_operator_id);
-    g_free (self->priv->current_operator_name);
+    g_free (self->priv->enabled_cache.current_operator_id);
+    g_free (self->priv->enabled_cache.current_operator_name);
     g_free (self->priv->requested_operator_id);
-    g_list_free_full (self->priv->pco_list, g_object_unref);
+    g_list_free_full (self->priv->enabled_cache.pco_list, g_object_unref);
 
     G_OBJECT_CLASS (mm_broadband_modem_mbim_parent_class)->finalize (object);
 }

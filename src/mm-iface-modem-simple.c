@@ -65,6 +65,21 @@ get_private (MMIfaceModemSimple *self)
 }
 
 /*****************************************************************************/
+/* Abort ongoing requests, if any */
+
+void
+mm_iface_modem_simple_abort_ongoing (MMIfaceModemSimple *self)
+{
+    Private *priv;
+
+    priv = get_private (self);
+    if (priv->ongoing_connect) {
+        g_cancellable_cancel (priv->ongoing_connect);
+        g_clear_object (&priv->ongoing_connect);
+    }
+}
+
+/*****************************************************************************/
 /* Register in either a CDMA or a 3GPP network (or both) */
 
 typedef struct {
@@ -78,7 +93,7 @@ static void
 register_in_network_context_free (RegisterInNetworkContext *ctx)
 {
     g_free (ctx->operator_id);
-    g_free (ctx);
+    g_slice_free (RegisterInNetworkContext, ctx);
 }
 
 static gboolean
@@ -108,6 +123,7 @@ register_in_cdma_network_ready (MMIfaceModemCdma *self,
     }
 
     /* Registered we are! */
+    mm_obj_dbg (self, "registration in network: successful (cdma)");
     g_task_return_boolean (task, TRUE);
     g_object_unref (task);
 }
@@ -129,6 +145,7 @@ register_in_3gpp_network_ready (MMIfaceModem3gpp *self,
     }
 
     /* Registered we are! */
+    mm_obj_dbg (self, "registration in network: successful (3gpp)");
     g_task_return_boolean (task, TRUE);
     g_object_unref (task);
 }
@@ -137,10 +154,16 @@ static void
 check_next_registration (GTask *task)
 {
     RegisterInNetworkContext *ctx;
-    MMIfaceModemSimple *self;
+    MMIfaceModemSimple       *self;
 
     self = MM_IFACE_MODEM_SIMPLE (g_task_get_source_object (task));
     ctx = g_task_get_task_data (task);
+
+    if (g_task_return_error_if_cancelled (task)) {
+        mm_obj_dbg (self, "registration in network: cancelled");
+        g_object_unref (task);
+        return;
+    }
 
     if (ctx->remaining_tries_cdma > ctx->remaining_tries_3gpp &&
         ctx->remaining_tries_cdma > 0) {
@@ -164,6 +187,7 @@ check_next_registration (GTask *task)
     }
 
     /* No more tries of anything */
+    mm_obj_dbg (self, "registration in network: timed out");
     g_task_return_error (
         task,
         mm_mobile_equipment_error_for_code (MM_MOBILE_EQUIPMENT_ERROR_NETWORK_TIMEOUT, self));
@@ -171,15 +195,16 @@ check_next_registration (GTask *task)
 }
 
 static void
-register_in_3gpp_or_cdma_network (MMIfaceModemSimple *self,
-                                  const gchar *operator_id,
-                                  GAsyncReadyCallback callback,
-                                  gpointer user_data)
+register_in_3gpp_or_cdma_network (MMIfaceModemSimple  *self,
+                                  const gchar         *operator_id,
+                                  GCancellable        *cancellable,
+                                  GAsyncReadyCallback  callback,
+                                  gpointer             user_data)
 {
     RegisterInNetworkContext *ctx;
-    GTask *task;
+    GTask                    *task;
 
-    ctx = g_new0 (RegisterInNetworkContext, 1);
+    ctx = g_slice_new0 (RegisterInNetworkContext);
     ctx->operator_id = g_strdup (operator_id);
 
     /* 3GPP-only modems... */
@@ -201,10 +226,8 @@ register_in_3gpp_or_cdma_network (MMIfaceModemSimple *self,
         ctx->remaining_tries_3gpp = 6;
     }
 
-    task = g_task_new (self, NULL, callback, user_data);
-    g_task_set_task_data (task,
-                          ctx,
-                          (GDestroyNotify)register_in_network_context_free);
+    task = g_task_new (self, cancellable, callback, user_data);
+    g_task_set_task_data (task, ctx, (GDestroyNotify)register_in_network_context_free);
 
     check_next_registration (task);
 }
@@ -228,7 +251,7 @@ typedef struct {
 static void
 packet_service_attach_in_3gpp_network_context_free (PacketServiceAttachIn3gppNetworkContext *ctx)
 {
-    g_assert (!ctx->error);
+    g_clear_error (&ctx->error);
     g_slice_free (PacketServiceAttachIn3gppNetworkContext, ctx);
 }
 
@@ -296,6 +319,12 @@ packet_service_attach_in_3gpp_network_step (GTask *task)
     self = g_task_get_source_object (task);
     ctx = g_task_get_task_data (task);
 
+    if (g_task_return_error_if_cancelled (task)) {
+        mm_obj_dbg (self, "packet service attach in 3gpp network: cancelled");
+        g_object_unref (task);
+        return;
+    }
+
     switch (ctx->step) {
         case PACKET_SERVICE_ATTACH_IN_3GPP_NETWORK_STEP_FIRST:
             ctx->step++;
@@ -305,6 +334,7 @@ packet_service_attach_in_3gpp_network_step (GTask *task)
             g_assert (!ctx->error);
             mm_iface_modem_3gpp_wait_for_packet_service_state (MM_IFACE_MODEM_3GPP (self),
                                                                MM_MODEM_3GPP_PACKET_SERVICE_STATE_ATTACHED,
+                                                               g_task_get_cancellable (task),
                                                                (GAsyncReadyCallback)wait_for_packet_service_state_ready,
                                                                task);
             return;
@@ -322,15 +352,19 @@ packet_service_attach_in_3gpp_network_step (GTask *task)
             g_assert (!ctx->error);
             mm_iface_modem_3gpp_wait_for_packet_service_state (MM_IFACE_MODEM_3GPP (self),
                                                                MM_MODEM_3GPP_PACKET_SERVICE_STATE_ATTACHED,
+                                                               g_task_get_cancellable (task),
                                                                (GAsyncReadyCallback)wait_for_packet_service_state_ready,
                                                                task);
             return;
 
         case PACKET_SERVICE_ATTACH_IN_3GPP_NETWORK_STEP_LAST:
-            if (ctx->error)
+            if (ctx->error) {
+                mm_obj_dbg (self, "packet service attach in 3gpp network: failed: %s", ctx->error->message);
                 g_task_return_error (task, g_steal_pointer (&ctx->error));
-            else
+            } else {
+                mm_obj_dbg (self, "packet service attach in 3gpp network: finished");
                 g_task_return_boolean (task, TRUE);
+            }
             g_object_unref (task);
             return;
 
@@ -341,13 +375,14 @@ packet_service_attach_in_3gpp_network_step (GTask *task)
 
 static void
 packet_service_attach_in_3gpp_network (MMIfaceModemSimple  *self,
+                                       GCancellable        *cancellable,
                                        GAsyncReadyCallback  callback,
                                        gpointer             user_data)
 {
     PacketServiceAttachIn3gppNetworkContext *ctx;
     GTask                                   *task;
 
-    task = g_task_new (self, NULL, callback, user_data);
+    task = g_task_new (self, cancellable, callback, user_data);
     ctx = g_slice_new0 (PacketServiceAttachIn3gppNetworkContext);
     ctx->step = PACKET_SERVICE_ATTACH_IN_3GPP_NETWORK_STEP_FIRST;
     g_task_set_task_data (task, ctx, (GDestroyNotify)packet_service_attach_in_3gpp_network_context_free);
@@ -761,6 +796,7 @@ connection_step (ConnectionContext *ctx)
             register_in_3gpp_or_cdma_network (
                 ctx->self,
                 mm_simple_connect_properties_get_operator_id (ctx->properties),
+                ctx->cancellable,
                 (GAsyncReadyCallback)register_in_3gpp_or_cdma_network_ready,
                 ctx);
             return;
@@ -777,6 +813,7 @@ connection_step (ConnectionContext *ctx)
         if (mm_iface_modem_is_3gpp (MM_IFACE_MODEM (ctx->self))) {
             packet_service_attach_in_3gpp_network (
                 ctx->self,
+                ctx->cancellable,
                 (GAsyncReadyCallback)packet_service_attach_in_3gpp_network_ready,
                 ctx);
             return;
@@ -965,8 +1002,6 @@ typedef struct {
     MmGdbusModemSimple    *skeleton;
     GDBusMethodInvocation *invocation;
     gchar                 *bearer_path;
-    GList                 *bearers;
-    MMBaseBearer          *current;
 } DisconnectionContext;
 
 static void
@@ -976,61 +1011,24 @@ disconnection_context_free (DisconnectionContext *ctx)
     g_object_unref (ctx->invocation);
     g_object_unref (ctx->self);
     g_free (ctx->bearer_path);
-    g_clear_object (&ctx->current);
-    g_list_free_full (ctx->bearers, g_object_unref);
     g_slice_free (DisconnectionContext, ctx);
 }
 
-static void disconnect_next_bearer (DisconnectionContext *ctx);
-
 static void
-disconnect_ready (MMBaseBearer         *bearer,
-                  GAsyncResult         *res,
-                  DisconnectionContext *ctx)
+bearer_list_disconnect_bearers_ready (MMBearerList         *bearer_list,
+                                      GAsyncResult         *res,
+                                      DisconnectionContext *ctx)
 {
     GError *error = NULL;
 
-    if (!mm_base_bearer_disconnect_finish (bearer, res, &error)) {
-        mm_obj_warn (ctx->self, "failed to disconnect bearer '%s': %s",
-                     mm_base_bearer_get_path (bearer), error->message);
+    if (!mm_bearer_list_disconnect_bearers_finish (bearer_list, res, &error)) {
+        mm_obj_warn (ctx->self, "failed to disconnect bearers: %s", error->message);
         g_dbus_method_invocation_take_error (ctx->invocation, error);
-        disconnection_context_free (ctx);
-        return;
-    }
-
-    disconnect_next_bearer (ctx);
-}
-
-static void
-disconnect_next_bearer (DisconnectionContext *ctx)
-{
-    if (ctx->current)
-        g_clear_object (&ctx->current);
-
-    /* No more bearers? all done! */
-    if (!ctx->bearers) {
+    } else {
         mm_obj_info (ctx->self, "all requested bearers disconnected");
         mm_gdbus_modem_simple_complete_disconnect (ctx->skeleton, ctx->invocation);
-        disconnection_context_free (ctx);
-        return;
     }
-
-    ctx->current = MM_BASE_BEARER (ctx->bearers->data);
-    ctx->bearers = g_list_delete_link (ctx->bearers, ctx->bearers);
-
-    mm_obj_info (ctx->self, "disconnecting bearer '%s'...", mm_base_bearer_get_path (ctx->current));
-    mm_base_bearer_disconnect (ctx->current,
-                               (GAsyncReadyCallback)disconnect_ready,
-                               ctx);
-}
-
-static void
-build_connected_bearer_list (MMBaseBearer         *bearer,
-                             DisconnectionContext *ctx)
-{
-    if (!ctx->bearer_path ||
-        g_str_equal (ctx->bearer_path, mm_base_bearer_get_path (bearer)))
-        ctx->bearers = g_list_prepend (ctx->bearers, g_object_ref (bearer));
+    disconnection_context_free (ctx);
 }
 
 static void
@@ -1040,7 +1038,6 @@ disconnect_auth_ready (MMBaseModem          *self,
 {
     g_autoptr(MMBearerList)  list = NULL;
     GError                  *error = NULL;
-    Private                 *priv;
 
     if (!mm_base_modem_authorize_finish (self, res, &error)) {
         g_dbus_method_invocation_take_error (ctx->invocation, error);
@@ -1050,11 +1047,8 @@ disconnect_auth_ready (MMBaseModem          *self,
 
     /* If not disconnecting a specific bearer, also cancel any ongoing
      * connection attempt. */
-    priv = get_private (MM_IFACE_MODEM_SIMPLE (self));
-    if (!ctx->bearer_path && priv->ongoing_connect) {
-        g_cancellable_cancel (priv->ongoing_connect);
-        g_clear_object (&priv->ongoing_connect);
-    }
+    if (!ctx->bearer_path)
+        mm_iface_modem_simple_abort_ongoing (MM_IFACE_MODEM_SIMPLE (self));
 
     g_object_get (self,
                   MM_IFACE_MODEM_BEARER_LIST, &list,
@@ -1074,24 +1068,10 @@ disconnect_auth_ready (MMBaseModem          *self,
     else
         mm_obj_info (self, "processing user request to disconnect modem: all bearers");
 
-    mm_bearer_list_foreach (list,
-                            (MMBearerListForeachFunc)build_connected_bearer_list,
-                            ctx);
-
-    if (ctx->bearer_path && !ctx->bearers) {
-        mm_obj_warn (self, "failed to disconnect bearer '%s': not found", ctx->bearer_path);
-        g_dbus_method_invocation_return_error (
-            ctx->invocation,
-            MM_CORE_ERROR,
-            MM_CORE_ERROR_INVALID_ARGS,
-            "Couldn't disconnect bearer '%s': not found",
-            ctx->bearer_path);
-        disconnection_context_free (ctx);
-        return;
-    }
-
-    /* Go on disconnecting bearers */
-    disconnect_next_bearer (ctx);
+    mm_bearer_list_disconnect_bearers (list,
+                                       ctx->bearer_path,
+                                       (GAsyncReadyCallback)bearer_list_disconnect_bearers_ready,
+                                       ctx);
 }
 
 static gboolean

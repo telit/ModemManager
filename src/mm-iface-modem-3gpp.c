@@ -61,6 +61,8 @@
 static GQuark private_quark;
 
 typedef struct {
+    /* Interface enabled or disabled */
+    gboolean iface_enabled;
     /* Registration state */
     MMModem3gppRegistrationState  state_cs;
     MMModem3gppRegistrationState  state_ps;
@@ -73,6 +75,8 @@ typedef struct {
     /* Registration checks */
     guint    check_timeout_source;
     gboolean check_running;
+    /* Packet service state */
+    gboolean packet_service_state_update_supported;
 } Private;
 
 static void
@@ -133,8 +137,9 @@ GET_NETWORK_SUPPORTED (5gs, 5GS)
 
 typedef struct {
     MMModem3gppPacketServiceState final_state;
-    gulong packet_service_state_changed_id;
-    guint packet_service_state_changed_wait_id;
+    gulong                        state_changed_id;
+    guint                         timeout_id;
+    gulong                        cancellable_id;
 } WaitForPacketServiceStateContext;
 
 MMModem3gppPacketServiceState
@@ -164,29 +169,61 @@ wait_for_packet_service_state_context_complete (GTask                         *t
     self = g_task_get_source_object (task);
     ctx = g_task_get_task_data (task);
 
-    if (ctx->packet_service_state_changed_id) {
-        if (g_signal_handler_is_connected (self, ctx->packet_service_state_changed_id))
-            g_signal_handler_disconnect (self, ctx->packet_service_state_changed_id);
-        ctx->packet_service_state_changed_id = 0;
+    g_assert (ctx->state_changed_id);
+    if (g_signal_handler_is_connected (self, ctx->state_changed_id))
+        g_signal_handler_disconnect (self, ctx->state_changed_id);
+    ctx->state_changed_id = 0;
+
+    g_assert (ctx->timeout_id);
+    g_source_remove (ctx->timeout_id);
+    ctx->timeout_id = 0;
+
+    if (!g_task_return_error_if_cancelled (task)) {
+        if (ctx->cancellable_id) {
+            g_cancellable_disconnect (g_task_get_cancellable (task), ctx->cancellable_id);
+            ctx->cancellable_id = 0;
+        }
+        if (error)
+            g_task_return_error (task, error);
+        else
+            g_task_return_int (task, state);
     }
-
-    if (ctx->packet_service_state_changed_wait_id) {
-        g_source_remove (ctx->packet_service_state_changed_wait_id);
-        ctx->packet_service_state_changed_wait_id = 0;
-    }
-
-    if (error)
-        g_task_return_error (task, error);
-    else
-        g_task_return_int (task, state);
-
     g_object_unref (task);
 }
 
-static gboolean
-packet_service_state_changed_wait_expired (GTask *task)
+static void
+packet_service_wait_cancelled (GCancellable *cancellable,
+                               GTask        *task)
 {
-    GError *error;
+    MMIfaceModem3gpp                 *self;
+    WaitForPacketServiceStateContext *ctx;
+
+    self = g_task_get_source_object (task);
+    ctx = g_task_get_task_data (task);
+
+    mm_obj_dbg (self, "wait for packet service state '%s': cancelled",
+                (ctx->final_state == MM_MODEM_3GPP_PACKET_SERVICE_STATE_UNKNOWN) ?
+                "any" : mm_modem_3gpp_packet_service_state_get_string (ctx->final_state));
+
+    /* Given that the cancellable is the same one as in the task, we can complete the operation here
+     * without specifying an exact error. The task will itself be completed with a cancelled error. */
+    g_assert (g_task_get_cancellable (task) == cancellable);
+    wait_for_packet_service_state_context_complete (task, MM_MODEM_3GPP_PACKET_SERVICE_STATE_UNKNOWN, NULL);
+}
+
+static gboolean
+packet_service_wait_timeout (GTask *task)
+{
+    MMIfaceModem3gpp                 *self;
+    WaitForPacketServiceStateContext *ctx;
+    GError                           *error;
+
+    self = g_task_get_source_object (task);
+    ctx = g_task_get_task_data (task);
+
+    mm_obj_dbg (self, "wait for packet service state '%s': timed out",
+                (ctx->final_state == MM_MODEM_3GPP_PACKET_SERVICE_STATE_UNKNOWN) ?
+                "any" : mm_modem_3gpp_packet_service_state_get_string (ctx->final_state));
 
     error = g_error_new (MM_CORE_ERROR,
                          MM_CORE_ERROR_RETRY,
@@ -216,6 +253,10 @@ packet_service_state_changed (MMIfaceModem3gpp *self,
         (state != ctx->final_state))
         return;
 
+    mm_obj_dbg (self, "wait for packet service state '%s': finished",
+                (ctx->final_state == MM_MODEM_3GPP_PACKET_SERVICE_STATE_UNKNOWN) ?
+                "any" : mm_modem_3gpp_packet_service_state_get_string (ctx->final_state));
+
     /* Done! */
     wait_for_packet_service_state_context_complete (task, state, NULL);
 }
@@ -223,6 +264,7 @@ packet_service_state_changed (MMIfaceModem3gpp *self,
 void
 mm_iface_modem_3gpp_wait_for_packet_service_state (MMIfaceModem3gpp              *self,
                                                    MMModem3gppPacketServiceState  final_state,
+                                                   GCancellable                  *cancellable,
                                                    GAsyncReadyCallback            callback,
                                                    gpointer                       user_data)
 {
@@ -230,7 +272,7 @@ mm_iface_modem_3gpp_wait_for_packet_service_state (MMIfaceModem3gpp             
     WaitForPacketServiceStateContext *ctx;
     GTask                            *task;
 
-    task = g_task_new (self, NULL, callback, user_data);
+    task = g_task_new (self, cancellable, callback, user_data);
 
     g_object_get (self,
                   MM_IFACE_MODEM_3GPP_PACKET_SERVICE_STATE, &state,
@@ -250,15 +292,34 @@ mm_iface_modem_3gpp_wait_for_packet_service_state (MMIfaceModem3gpp             
 
     g_task_set_task_data (task, ctx, g_free);
 
+    /* Ownership of the task will be shared among the signal handler, the timeout,
+     * and the cancellable. As soon as one of them is triggered, it should cancel the
+     * other two. */
+
     /* Want to get notified when packet service state changes */
-    ctx->packet_service_state_changed_id = g_signal_connect (self,
-                                                             "notify::" MM_IFACE_MODEM_3GPP_PACKET_SERVICE_STATE,
-                                                             G_CALLBACK (packet_service_state_changed),
-                                                             task);
+    ctx->state_changed_id = g_signal_connect (self,
+                                              "notify::" MM_IFACE_MODEM_3GPP_PACKET_SERVICE_STATE,
+                                              G_CALLBACK (packet_service_state_changed),
+                                              task);
     /* But we don't want to wait forever */
-    ctx->packet_service_state_changed_wait_id = g_timeout_add_seconds (10,
-                                                                       (GSourceFunc)packet_service_state_changed_wait_expired,
-                                                                       task);
+    ctx->timeout_id = g_timeout_add_seconds (10,
+                                             (GSourceFunc)packet_service_wait_timeout,
+                                             task);
+
+    /* And we want it to be cancellable */
+    if (cancellable) {
+        ctx->cancellable_id = g_cancellable_connect (cancellable,
+                                                     (GCallback) packet_service_wait_cancelled,
+                                                     task,
+                                                     NULL);
+        /* Do nothing if already cancelled, packet_service_wait_cancelled() will already be called */
+        if (!ctx->cancellable_id)
+            return;
+    }
+
+    mm_obj_dbg (self, "wait for packet service state '%s': started",
+                (final_state == MM_MODEM_3GPP_PACKET_SERVICE_STATE_UNKNOWN) ?
+                "any" : mm_modem_3gpp_packet_service_state_get_string (final_state));
 }
 
 /*****************************************************************************/
@@ -298,6 +359,7 @@ get_consolidated_packet_service_state (MMIfaceModem3gpp *self)
     Private *priv;
 
     priv = get_private (self);
+    g_assert (!priv->packet_service_state_update_supported);
 
     /* If registered in any of PS, EPS or 5GS, then packet service domain is
      * implicitly attached. */
@@ -2011,6 +2073,8 @@ mm_iface_modem_3gpp_update_access_technologies (MMIfaceModem3gpp        *self,
     MMModem3gppRegistrationState  state;
 
     priv = get_private (self);
+    if (!priv->iface_enabled)
+        return;
 
     g_object_get (self,
                   MM_IFACE_MODEM_3GPP_REGISTRATION_STATE, &state,
@@ -2039,6 +2103,8 @@ mm_iface_modem_3gpp_update_location (MMIfaceModem3gpp *self,
     MMModem3gppRegistrationState  state;
 
     priv = get_private (self);
+    if (!priv->iface_enabled)
+        return;
 
     if (!MM_IS_IFACE_MODEM_LOCATION (self))
         return;
@@ -2063,6 +2129,9 @@ mm_iface_modem_3gpp_update_location (MMIfaceModem3gpp *self,
 
 /*****************************************************************************/
 
+static void update_packet_service_state (MMIfaceModem3gpp              *self,
+                                         MMModem3gppPacketServiceState  new_state);
+
 static void
 update_registration_reload_current_registration_info_ready (MMIfaceModem3gpp *self,
                                                             GAsyncResult     *res,
@@ -2072,8 +2141,14 @@ update_registration_reload_current_registration_info_ready (MMIfaceModem3gpp *se
     MMModem3gppRegistrationState  new_state;
 
     priv = get_private (self);
+    if (!priv->iface_enabled)
+        return;
 
     new_state = GPOINTER_TO_UINT (user_data);
+
+    /* Update packet service state if we don't support external updates */
+    if (!priv->packet_service_state_update_supported)
+        update_packet_service_state (self, get_consolidated_packet_service_state (self));
 
     mm_obj_msg (self, "3GPP registration state changed (registering -> %s)",
                 mm_modem_3gpp_registration_state_get_string (new_state));
@@ -2087,8 +2162,7 @@ update_registration_reload_current_registration_info_ready (MMIfaceModem3gpp *se
     /* The properties in the interface are bound to the properties
      * in the skeleton, so just updating here is enough */
     g_object_set (self,
-                  MM_IFACE_MODEM_3GPP_REGISTRATION_STATE,   new_state,
-                  MM_IFACE_MODEM_3GPP_PACKET_SERVICE_STATE, get_consolidated_packet_service_state (self),
+                  MM_IFACE_MODEM_3GPP_REGISTRATION_STATE, new_state,
                   NULL);
 
     mm_iface_modem_update_subsystem_state (MM_IFACE_MODEM (self),
@@ -2104,14 +2178,24 @@ update_non_registered_state (MMIfaceModem3gpp             *self,
                              MMModem3gppRegistrationState  old_state,
                              MMModem3gppRegistrationState  new_state)
 {
+    Private *priv;
+
+    priv = get_private (self);
+    if (!priv->iface_enabled)
+        return;
+
     /* Not registered neither in home nor roaming network */
     mm_iface_modem_3gpp_clear_current_operator (self);
+
+    /* No packet service if we're not registered. This change is done
+     * also when the device itself supports reporting the packet service
+     * state updates. */
+    update_packet_service_state (self, MM_MODEM_3GPP_PACKET_SERVICE_STATE_DETACHED);
 
     /* The property in the interface is bound to the property
      * in the skeleton, so just updating here is enough */
     g_object_set (self,
-                  MM_IFACE_MODEM_3GPP_REGISTRATION_STATE,   new_state,
-                  MM_IFACE_MODEM_3GPP_PACKET_SERVICE_STATE, MM_MODEM_3GPP_PACKET_SERVICE_STATE_DETACHED,
+                  MM_IFACE_MODEM_3GPP_REGISTRATION_STATE, new_state,
                   NULL);
 
     mm_iface_modem_update_subsystem_state (
@@ -2127,20 +2211,34 @@ static void
 update_registration_state (MMIfaceModem3gpp             *self,
                            MMModem3gppRegistrationState  new_state)
 {
-    Private                       *priv;
-    MMModem3gppRegistrationState   old_state = MM_MODEM_3GPP_REGISTRATION_STATE_UNKNOWN;
-    MMModem3gppPacketServiceState  old_packet_service_state = MM_MODEM_3GPP_PACKET_SERVICE_STATE_UNKNOWN;
+    Private                      *priv;
+    MMModem3gppRegistrationState  old_state = MM_MODEM_3GPP_REGISTRATION_STATE_UNKNOWN;
 
     priv = get_private (self);
+    if (!priv->iface_enabled)
+        return;
 
     g_object_get (self,
-                  MM_IFACE_MODEM_3GPP_REGISTRATION_STATE,   &old_state,
-                  MM_IFACE_MODEM_3GPP_PACKET_SERVICE_STATE, &old_packet_service_state,
+                  MM_IFACE_MODEM_3GPP_REGISTRATION_STATE, &old_state,
                   NULL);
 
     /* Only set new state if different */
-    if (new_state == old_state && old_packet_service_state == get_consolidated_packet_service_state (self))
-        return;
+    if (new_state == old_state) {
+        MMModem3gppPacketServiceState old_packet_service_state = MM_MODEM_3GPP_PACKET_SERVICE_STATE_UNKNOWN;
+
+        /* If packet service updates are expected, we can ignore the packet service state as that
+         * info won't be used to build a consolidated packet service state */
+        if (priv->packet_service_state_update_supported)
+            return;
+
+        /* If packet service updates are not expected, also check whether there are changes
+         * in the consolidate packet service state */
+        g_object_get (self,
+                      MM_IFACE_MODEM_3GPP_PACKET_SERVICE_STATE, &old_packet_service_state,
+                      NULL);
+        if (old_packet_service_state == get_consolidated_packet_service_state (self))
+            return;
+    }
 
     if (mm_modem_3gpp_registration_state_is_registered (new_state)) {
         MMModemState modem_state;
@@ -2202,6 +2300,8 @@ update_registration_state (MMIfaceModem3gpp             *self,
             return;                                                                                   \
                                                                                                       \
         priv = get_private (self);                                                                    \
+        if (!priv->iface_enabled)                                                                       \
+            return;                                                                                   \
         priv->state_##domain = state;                                                                 \
                                                                                                       \
         if (!deferred)                                                                                \
@@ -2217,6 +2317,50 @@ void
 mm_iface_modem_3gpp_apply_deferred_registration_state (MMIfaceModem3gpp *self)
 {
     update_registration_state (self, get_consolidated_reg_state (self));
+}
+
+/*****************************************************************************/
+/* Packet service state as reported by the device */
+
+static void
+update_packet_service_state (MMIfaceModem3gpp              *self,
+                             MMModem3gppPacketServiceState  new_state)
+{
+    MMModem3gppPacketServiceState  old_state = MM_MODEM_3GPP_PACKET_SERVICE_STATE_UNKNOWN;
+    Private                       *priv;
+
+    priv = get_private (self);
+    if (!priv->iface_enabled)
+        return;
+
+    g_object_get (self,
+                  MM_IFACE_MODEM_3GPP_PACKET_SERVICE_STATE, &old_state,
+                  NULL);
+
+    /* Only set new state if different */
+    if (old_state == new_state)
+        return;
+
+    mm_obj_msg (self, "3GPP packet service state changed (%s -> %s)",
+                mm_modem_3gpp_packet_service_state_get_string (old_state),
+                mm_modem_3gpp_packet_service_state_get_string (new_state));
+
+    /* The properties in the interface are bound to the properties
+     * in the skeleton, so just updating here is enough */
+    g_object_set (self,
+                  MM_IFACE_MODEM_3GPP_PACKET_SERVICE_STATE, new_state,
+                  NULL);
+}
+
+void
+mm_iface_modem_3gpp_update_packet_service_state (MMIfaceModem3gpp              *self,
+                                                 MMModem3gppPacketServiceState  new_state)
+{
+    Private *priv;
+
+    priv = get_private (self);
+    priv->packet_service_state_update_supported = TRUE;
+    update_packet_service_state (self, new_state);
 }
 
 /*****************************************************************************/
@@ -2302,9 +2446,14 @@ mm_iface_modem_3gpp_update_pco_list (MMIfaceModem3gpp *self,
                                      const GList *pco_list)
 {
     MmGdbusModem3gpp *skeleton = NULL;
-    GVariantBuilder builder;
-    GVariant *variant;
-    const GList *iter;
+    GVariantBuilder   builder;
+    GVariant         *variant;
+    const GList      *iter;
+    Private          *priv;
+
+    priv = get_private (self);
+    if (!priv->iface_enabled)
+        return;
 
     g_object_get (self,
                   MM_IFACE_MODEM_3GPP_DBUS_SKELETON, &skeleton,
@@ -2331,8 +2480,9 @@ void
 mm_iface_modem_3gpp_update_initial_eps_bearer (MMIfaceModem3gpp   *self,
                                                MMBearerProperties *properties)
 {
-    MmGdbusModem3gpp *skeleton = NULL;
-    MMBaseBearer     *old_bearer = NULL;
+    g_autoptr(MmGdbusModem3gppSkeleton) skeleton = NULL;
+    g_autoptr(MMBaseBearer)             old_bearer = NULL;
+    g_autoptr(MMBaseBearer)             new_bearer = NULL;
 
     g_object_get (self,
                   MM_IFACE_MODEM_3GPP_DBUS_SKELETON,      &skeleton,
@@ -2346,30 +2496,25 @@ mm_iface_modem_3gpp_update_initial_eps_bearer (MMIfaceModem3gpp   *self,
          mm_bearer_properties_cmp (properties,
                                    mm_base_bearer_peek_config (MM_BASE_BEARER (old_bearer)),
                                    MM_BEARER_PROPERTIES_CMP_FLAGS_EPS)))
-        goto out;
+        return;
 
-    if (properties) {
-        MMBaseBearer *new_bearer;
-
-        mm_obj_dbg (self, "updating initial EPS bearer...");
-        g_assert (MM_IFACE_MODEM_3GPP_GET_INTERFACE (self)->create_initial_eps_bearer);
-        new_bearer = MM_IFACE_MODEM_3GPP_GET_INTERFACE (self)->create_initial_eps_bearer (self, properties);
-        g_object_set (self,
-                      MM_IFACE_MODEM_3GPP_INITIAL_EPS_BEARER, new_bearer,
-                      NULL);
-        mm_gdbus_modem3gpp_set_initial_eps_bearer (skeleton, mm_base_bearer_get_path (new_bearer));
-        g_object_unref (new_bearer);
-    } else {
+    if (!properties) {
         mm_obj_dbg (self, "clearing initial EPS bearer...");
         g_object_set (self,
                       MM_IFACE_MODEM_3GPP_INITIAL_EPS_BEARER, NULL,
                       NULL);
-        mm_gdbus_modem3gpp_set_initial_eps_bearer (skeleton, NULL);
+        mm_gdbus_modem3gpp_set_initial_eps_bearer (MM_GDBUS_MODEM3GPP (skeleton), NULL);
+        return;
     }
 
-out:
-    g_clear_object (&old_bearer);
-    g_object_unref (skeleton);
+    mm_obj_dbg (self, "updating initial EPS bearer...");
+    g_assert (MM_IFACE_MODEM_3GPP_GET_INTERFACE (self)->create_initial_eps_bearer);
+    new_bearer = MM_IFACE_MODEM_3GPP_GET_INTERFACE (self)->create_initial_eps_bearer (self, properties);
+    g_object_set (self,
+                  MM_IFACE_MODEM_3GPP_INITIAL_EPS_BEARER, new_bearer,
+                  NULL);
+    mm_gdbus_modem3gpp_set_initial_eps_bearer (MM_GDBUS_MODEM3GPP (skeleton),
+                                               mm_base_bearer_get_path (new_bearer));
 }
 
 static void
@@ -2419,22 +2564,21 @@ typedef enum {
 } DisablingStep;
 
 struct _DisablingContext {
-    DisablingStep step;
-    MmGdbusModem *skeleton;
+    DisablingStep  step;
+    MmGdbusModem  *skeleton;
 };
 
 static void
 disabling_context_free (DisablingContext *ctx)
 {
-    if (ctx->skeleton)
-        g_object_unref (ctx->skeleton);
-    g_free (ctx);
+    g_clear_object (&ctx->skeleton);
+    g_slice_free (DisablingContext, ctx);
 }
 
 gboolean
-mm_iface_modem_3gpp_disable_finish (MMIfaceModem3gpp *self,
-                                    GAsyncResult *res,
-                                    GError **error)
+mm_iface_modem_3gpp_disable_finish (MMIfaceModem3gpp  *self,
+                                    GAsyncResult      *res,
+                                    GError           **error)
 {
     return g_task_propagate_boolean (G_TASK (res), error);
 }
@@ -2443,17 +2587,15 @@ mm_iface_modem_3gpp_disable_finish (MMIfaceModem3gpp *self,
 #define VOID_REPLY_READY_FN(NAME,DISPLAY)                               \
     static void                                                         \
     NAME##_ready (MMIfaceModem3gpp *self,                               \
-                  GAsyncResult *res,                                    \
-                  GTask *task)                                          \
+                  GAsyncResult     *res,                                \
+                  GTask            *task)                               \
     {                                                                   \
-        DisablingContext *ctx;                                          \
-        GError *error = NULL;                                           \
+        DisablingContext  *ctx;                                         \
+        g_autoptr(GError)  error = NULL;                                \
                                                                         \
         MM_IFACE_MODEM_3GPP_GET_INTERFACE (self)->NAME##_finish (self, res, &error); \
-        if (error) {                                                    \
+        if (error)                                                      \
             mm_obj_dbg (self, "couldn't %s: %s", DISPLAY, error->message);      \
-            g_error_free (error);                                       \
-        }                                                               \
                                                                         \
         /* Go on to next step */                                        \
         ctx = g_task_get_task_data (task);                              \
@@ -2474,9 +2616,11 @@ static void
 interface_disabling_step (GTask *task)
 {
     MMIfaceModem3gpp *self;
+    Private          *priv;
     DisablingContext *ctx;
 
     self = g_task_get_source_object (task);
+    priv = get_private (self);
     ctx = g_task_get_task_data (task);
 
     switch (ctx->step) {
@@ -2554,6 +2698,9 @@ interface_disabling_step (GTask *task)
         /* fall through */
 
     case DISABLING_STEP_LAST:
+        /* Interface state is assumed enabled until the very end of the disabling sequence,
+         * so that updates are taken into account and not ignored. */
+        priv->iface_enabled = FALSE;
         /* We are done without errors! */
         g_task_return_boolean (task, TRUE);
         g_object_unref (task);
@@ -2567,14 +2714,14 @@ interface_disabling_step (GTask *task)
 }
 
 void
-mm_iface_modem_3gpp_disable (MMIfaceModem3gpp *self,
-                             GAsyncReadyCallback callback,
-                             gpointer user_data)
+mm_iface_modem_3gpp_disable (MMIfaceModem3gpp    *self,
+                             GAsyncReadyCallback  callback,
+                             gpointer             user_data)
 {
     DisablingContext *ctx;
-    GTask *task;
+    GTask            *task;
 
-    ctx = g_new0 (DisablingContext, 1);
+    ctx = g_slice_new0 (DisablingContext);
     ctx->step = DISABLING_STEP_FIRST;
 
     task = g_task_new (self, NULL, callback, user_data);
@@ -2584,9 +2731,7 @@ mm_iface_modem_3gpp_disable (MMIfaceModem3gpp *self,
                   MM_IFACE_MODEM_3GPP_DBUS_SKELETON, &ctx->skeleton,
                   NULL);
     if (!ctx->skeleton) {
-        g_task_return_new_error (task,
-                                 MM_CORE_ERROR,
-                                 MM_CORE_ERROR_FAILED,
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
                                  "Couldn't get interface skeleton");
         g_object_unref (task);
         return;
@@ -2611,41 +2756,38 @@ typedef enum {
 } EnablingStep;
 
 struct _EnablingContext {
-    EnablingStep step;
+    EnablingStep      step;
     MmGdbusModem3gpp *skeleton;
 };
 
 static void
 enabling_context_free (EnablingContext *ctx)
 {
-    if (ctx->skeleton)
-        g_object_unref (ctx->skeleton);
-    g_free (ctx);
+    g_clear_object (&ctx->skeleton);
+    g_slice_free (EnablingContext, ctx);
 }
 
 gboolean
-mm_iface_modem_3gpp_enable_finish (MMIfaceModem3gpp *self,
-                                   GAsyncResult *res,
-                                   GError **error)
+mm_iface_modem_3gpp_enable_finish (MMIfaceModem3gpp  *self,
+                                   GAsyncResult      *res,
+                                   GError           **error)
 {
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
 static void
 setup_unsolicited_events_ready (MMIfaceModem3gpp *self,
-                                GAsyncResult *res,
-                                GTask *task)
+                                GAsyncResult     *res,
+                                GTask            *task)
 {
-    EnablingContext *ctx;
-    GError *error = NULL;
+    EnablingContext   *ctx;
+    g_autoptr(GError)  error = NULL;
 
     ctx = g_task_get_task_data (task);
 
     MM_IFACE_MODEM_3GPP_GET_INTERFACE (self)->setup_unsolicited_events_finish (self, res, &error);
     if (error) {
-        /* This error shouldn't be treated as critical */
         mm_obj_dbg (self, "setting up unsolicited events failed: %s", error->message);
-        g_error_free (error);
 
         /* If we get an error setting up unsolicited events, don't even bother trying to
          * enable them. */
@@ -2661,18 +2803,15 @@ setup_unsolicited_events_ready (MMIfaceModem3gpp *self,
 
 static void
 enable_unsolicited_events_ready (MMIfaceModem3gpp *self,
-                                 GAsyncResult *res,
-                                 GTask *task)
+                                 GAsyncResult     *res,
+                                 GTask            *task)
 {
-    EnablingContext *ctx;
-    GError *error = NULL;
+    EnablingContext   *ctx;
+    g_autoptr(GError)  error = NULL;
 
     MM_IFACE_MODEM_3GPP_GET_INTERFACE (self)->enable_unsolicited_events_finish (self, res, &error);
-    if (error) {
-        /* This error shouldn't be treated as critical */
+    if (error)
         mm_obj_dbg (self, "enabling unsolicited events failed: %s", error->message);
-        g_error_free (error);
-    }
 
     /* Go on to next step */
     ctx = g_task_get_task_data (task);
@@ -2682,26 +2821,24 @@ enable_unsolicited_events_ready (MMIfaceModem3gpp *self,
 
 static void
 setup_unsolicited_registration_events_ready (MMIfaceModem3gpp *self,
-                                             GAsyncResult *res,
-                                             GTask *task)
+                                             GAsyncResult     *res,
+                                             GTask            *task)
 {
-    EnablingContext *ctx;
-    GError *error = NULL;
+    EnablingContext   *ctx;
+    g_autoptr(GError)  error = NULL;
 
     ctx = g_task_get_task_data (task);
 
     MM_IFACE_MODEM_3GPP_GET_INTERFACE (self)->setup_unsolicited_registration_events_finish (self, res, &error);
     if (error) {
-        /* This error shouldn't be treated as critical */
         mm_obj_dbg (self, "setting up unsolicited registration events failed: %s", error->message);
-        g_error_free (error);
+        /* If error, setup periodic registration checks */
+        periodic_registration_check_enable (self);
 
         /* If we get an error setting up unsolicited events, don't even bother trying to
          * enable them. */
         ctx->step = ENABLING_STEP_ENABLE_UNSOLICITED_REGISTRATION_EVENTS + 1;
         interface_enabling_step (task);
-        /* If error, setup periodic registration checks */
-        periodic_registration_check_enable (self);
         return;
     }
 
@@ -2712,17 +2849,15 @@ setup_unsolicited_registration_events_ready (MMIfaceModem3gpp *self,
 
 static void
 enable_unsolicited_registration_events_ready (MMIfaceModem3gpp *self,
-                                              GAsyncResult *res,
-                                              GTask *task)
+                                              GAsyncResult     *res,
+                                              GTask            *task)
 {
-    EnablingContext *ctx;
-    GError *error = NULL;
+    EnablingContext   *ctx;
+    g_autoptr(GError)  error = NULL;
 
     MM_IFACE_MODEM_3GPP_GET_INTERFACE (self)->enable_unsolicited_registration_events_finish (self, res, &error);
     if (error) {
-        /* This error shouldn't be treated as critical */
         mm_obj_dbg (self, "enabling unsolicited registration events failed: %s", error->message);
-        g_error_free (error);
         /* If error, setup periodic registration checks */
         periodic_registration_check_enable (self);
     }
@@ -2738,23 +2873,18 @@ load_initial_eps_bearer_ready (MMIfaceModem3gpp *self,
                                GAsyncResult     *res,
                                GTask            *task)
 {
-    MMBearerProperties *properties;
-    EnablingContext    *ctx;
-    GError             *error = NULL;
+    EnablingContext               *ctx;
+    g_autoptr(MMBearerProperties)  properties = NULL;
+    g_autoptr(GError)              error = NULL;
 
     ctx = g_task_get_task_data (task);
 
     properties = MM_IFACE_MODEM_3GPP_GET_INTERFACE (self)->load_initial_eps_bearer_finish (self, res, &error);
-    if (!properties) {
+    if (!properties)
         mm_obj_dbg (self, "couldn't load initial default bearer properties: %s", error->message);
-        g_error_free (error);
-        goto out;
-    }
+    else
+        mm_iface_modem_3gpp_update_initial_eps_bearer (self, properties);
 
-    mm_iface_modem_3gpp_update_initial_eps_bearer (self, properties);
-    g_object_unref (properties);
-
-out:
     /* Go on to next step */
     ctx->step++;
     interface_enabling_step (task);
@@ -2764,19 +2894,25 @@ static void
 interface_enabling_step (GTask *task)
 {
     MMIfaceModem3gpp *self;
-    EnablingContext *ctx;
+    Private          *priv;
+    EnablingContext  *ctx;
+
+    self = g_task_get_source_object (task);
+    priv = get_private (self);
+    ctx  = g_task_get_task_data (task);
 
     /* Don't run new steps if we're cancelled */
     if (g_task_return_error_if_cancelled (task)) {
+        priv->iface_enabled = FALSE;
         g_object_unref (task);
         return;
     }
 
-    self = g_task_get_source_object (task);
-    ctx = g_task_get_task_data (task);
-
     switch (ctx->step) {
     case ENABLING_STEP_FIRST:
+        /* Interface state is assumed enabled from the very beginning of the enabling sequence,
+         * so that updates are taken into account and not ignored. */
+        priv->iface_enabled = TRUE;
         ctx->step++;
         /* fall through */
 
@@ -2858,15 +2994,15 @@ interface_enabling_step (GTask *task)
 }
 
 void
-mm_iface_modem_3gpp_enable (MMIfaceModem3gpp *self,
-                            GCancellable *cancellable,
-                            GAsyncReadyCallback callback,
-                            gpointer user_data)
+mm_iface_modem_3gpp_enable (MMIfaceModem3gpp    *self,
+                            GCancellable        *cancellable,
+                            GAsyncReadyCallback  callback,
+                            gpointer             user_data)
 {
     EnablingContext *ctx;
-    GTask *task;
+    GTask           *task;
 
-    ctx = g_new0 (EnablingContext, 1);
+    ctx = g_slice_new0 (EnablingContext);
     ctx->step = ENABLING_STEP_FIRST;
 
     task = g_task_new (self, cancellable, callback, user_data);
@@ -2876,9 +3012,7 @@ mm_iface_modem_3gpp_enable (MMIfaceModem3gpp *self,
                   MM_IFACE_MODEM_3GPP_DBUS_SKELETON, &ctx->skeleton,
                   NULL);
     if (!ctx->skeleton) {
-        g_task_return_new_error (task,
-                                 MM_CORE_ERROR,
-                                 MM_CORE_ERROR_FAILED,
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
                                  "Couldn't get interface skeleton");
         g_object_unref (task);
         return;
@@ -3065,20 +3199,20 @@ typedef enum {
 } InitializationStep;
 
 struct _InitializationContext {
-    MmGdbusModem3gpp *skeleton;
-    InitializationStep step;
+    MmGdbusModem3gpp   *skeleton;
+    InitializationStep  step;
 };
 
 static void
 initialization_context_free (InitializationContext *ctx)
 {
-    g_object_unref (ctx->skeleton);
-    g_free (ctx);
+    g_clear_object (&ctx->skeleton);
+    g_slice_free (InitializationContext, ctx);
 }
 
 static void
-sim_pin_lock_enabled_cb (MMBaseSim *self,
-                         gboolean enabled,
+sim_pin_lock_enabled_cb (MMBaseSim        *self,
+                         gboolean          enabled,
                          MmGdbusModem3gpp *skeleton)
 {
     MMModem3gppFacility facilities;
@@ -3172,8 +3306,8 @@ load_enabled_facility_locks_ready (MMIfaceModem3gpp *self,
                                    GTask            *task)
 {
     InitializationContext *ctx;
-    g_autoptr(GError)      error = NULL;
     MMModem3gppFacility    facilities;
+    g_autoptr(GError)      error = NULL;
 
     ctx = g_task_get_task_data (task);
 
@@ -3228,9 +3362,9 @@ load_imei_ready (MMIfaceModem3gpp *self,
 static void
 interface_initialization_step (GTask *task)
 {
-    MMIfaceModem3gpp *self;
+    MMIfaceModem3gpp      *self;
     InitializationContext *ctx;
-    MMModemState modem_state;
+    MMModemState           modem_state;
 
     /* Don't run new steps if we're cancelled */
     if (g_task_return_error_if_cancelled (task)) {
@@ -3239,7 +3373,7 @@ interface_initialization_step (GTask *task)
     }
 
     self = g_task_get_source_object (task);
-    ctx = g_task_get_task_data (task);
+    ctx  = g_task_get_task_data (task);
 
     switch (ctx->step) {
     case INITIALIZATION_STEP_FIRST:
@@ -3380,22 +3514,22 @@ interface_initialization_step (GTask *task)
 }
 
 gboolean
-mm_iface_modem_3gpp_initialize_finish (MMIfaceModem3gpp *self,
-                                       GAsyncResult *res,
-                                       GError **error)
+mm_iface_modem_3gpp_initialize_finish (MMIfaceModem3gpp  *self,
+                                       GAsyncResult      *res,
+                                       GError           **error)
 {
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
 void
-mm_iface_modem_3gpp_initialize (MMIfaceModem3gpp *self,
-                                GCancellable *cancellable,
-                                GAsyncReadyCallback callback,
-                                gpointer user_data)
+mm_iface_modem_3gpp_initialize (MMIfaceModem3gpp    *self,
+                                GCancellable        *cancellable,
+                                GAsyncReadyCallback  callback,
+                                gpointer             user_data)
 {
-    MmGdbusModem3gpp *skeleton = NULL;
+    MmGdbusModem3gpp      *skeleton = NULL;
     InitializationContext *ctx;
-    GTask *task;
+    GTask                 *task;
 
     /* Did we already create it? */
     g_object_get (self,
@@ -3428,7 +3562,7 @@ mm_iface_modem_3gpp_initialize (MMIfaceModem3gpp *self,
                       NULL);
     }
 
-    ctx = g_new0 (InitializationContext, 1);
+    ctx = g_slice_new0 (InitializationContext);
     ctx->step = INITIALIZATION_STEP_FIRST;
     ctx->skeleton = skeleton;
 
