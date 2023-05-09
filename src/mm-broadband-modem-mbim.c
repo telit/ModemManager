@@ -5007,8 +5007,14 @@ basic_connect_notification_subscriber_ready_status (MMBroadbandModemMbim *self,
         mm_obj_dbg (self, "processed subscriber ready status notification");
     }
 
-    if (ready_state == MBIM_SUBSCRIBER_READY_STATE_INITIALIZED)
+    if (ready_state == MBIM_SUBSCRIBER_READY_STATE_INITIALIZED) {
         mm_iface_modem_update_own_numbers (MM_IFACE_MODEM (self), telephone_numbers);
+        if(self->priv->enabled_cache.last_ready_state == MBIM_SUBSCRIBER_READY_STATE_NOT_INITIALIZED) {
+            /* SIM has been reinserted quickly after sim removal, re-probe to ensure correct interfaces are exposed */
+            mm_obj_dbg (self, "quick SIM hot swap detected");
+            active_sim_event = TRUE;
+        }
+    }
 
     if ((self->priv->enabled_cache.last_ready_state != MBIM_SUBSCRIBER_READY_STATE_NO_ESIM_PROFILE &&
          ready_state == MBIM_SUBSCRIBER_READY_STATE_NO_ESIM_PROFILE) ||
