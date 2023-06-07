@@ -43,6 +43,7 @@
 #include "mm-iface-modem-messaging.h"
 #include "mm-iface-modem-signal.h"
 #include "mm-iface-modem-sar.h"
+#include "mm-iface-modem-time.h"
 #include "mm-sms-part-3gpp.h"
 
 #if defined WITH_QMI && QMI_MBIM_QMUX_SUPPORTED
@@ -58,6 +59,7 @@ static void iface_modem_location_init             (MMIfaceModemLocation         
 static void iface_modem_messaging_init            (MMIfaceModemMessaging          *iface);
 static void iface_modem_signal_init               (MMIfaceModemSignal             *iface);
 static void iface_modem_sar_init                  (MMIfaceModemSar                *iface);
+static void iface_modem_time_init                 (MMIfaceModemTime               *iface);
 #if defined WITH_QMI && QMI_MBIM_QMUX_SUPPORTED
 static void shared_qmi_init                       (MMSharedQmi                    *iface);
 #endif
@@ -77,6 +79,7 @@ G_DEFINE_TYPE_EXTENDED (MMBroadbandModemMbim, mm_broadband_modem_mbim, MM_TYPE_B
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_MESSAGING, iface_modem_messaging_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_SIGNAL, iface_modem_signal_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_SAR, iface_modem_sar_init)
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_TIME, iface_modem_time_init)
 #if defined WITH_QMI && QMI_MBIM_QMUX_SUPPORTED
                         G_IMPLEMENT_INTERFACE (MM_TYPE_SHARED_QMI, shared_qmi_init)
 #endif
@@ -95,6 +98,7 @@ typedef enum {
     PROCESS_NOTIFICATION_FLAG_LTE_ATTACH_INFO      = 1 << 8,
     PROCESS_NOTIFICATION_FLAG_PROVISIONED_CONTEXTS = 1 << 9,
     PROCESS_NOTIFICATION_FLAG_SLOT_INFO_STATUS     = 1 << 10,
+    PROCESS_NOTIFICATION_FLAG_NITZ_TIME_INFO       = 1 << 11,
 } ProcessNotificationFlag;
 
 enum {
@@ -145,6 +149,7 @@ struct _MMBroadbandModemMbimPrivate {
     gboolean is_intel_reset_supported;
     gboolean is_slot_info_status_supported;
     gboolean is_ms_sar_supported;
+    gboolean is_nitz_info_supported;
 
     /* Process unsolicited notifications */
     guint notification_id;
@@ -3386,6 +3391,17 @@ query_device_services_ready (MbimDevice   *device,
                 continue;
             }
 
+            if (service == MBIM_SERVICE_MS_VOICE_EXTENSIONS) {
+                for (j = 0; j < device_services[i]->cids_count; j++) {
+                    if (device_services[i]->cids[j] == MBIM_CID_MS_VOICE_EXTENSIONS_NITZ) {
+                        mm_obj_dbg (self, "NITZ is supported");
+                        self->priv->is_nitz_info_supported = TRUE;
+                        break;
+                    }
+                }
+                continue;
+            }
+
             /* no optional features to check in remaining services */
         }
         mbim_device_service_element_array_free (device_services);
@@ -5784,6 +5800,64 @@ ussd_notification (MMBroadbandModemMbim *self,
 }
 
 static void
+process_nitz_time_info_notification (MMBroadbandModemMbim *self,
+                                     MbimMessage          *notification)
+{
+    guint32           year;
+    guint32           month;
+    guint32           day;
+    guint32           hour;
+    guint32           minute;
+    guint32           second;
+    guint32           time_zone_offset_minutes;
+    guint32           daylight_saving_time_offset_minutes;
+    MbimDataClass     data_class;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar  *iso8601 = NULL;
+
+    mbim_message_ms_voice_extensions_nitz_notification_parse (notification,
+                                                              &year,
+                                                              &month,
+                                                              &day,
+                                                              &hour,
+                                                              &minute,
+                                                              &second,
+                                                              &time_zone_offset_minutes,
+                                                              &daylight_saving_time_offset_minutes,
+                                                              &data_class,
+                                                              &error);
+
+    iso8601 = mm_new_iso8601_time (year,
+                                   month,
+                                   day,
+                                   hour,
+                                   minute,
+                                   second,
+                                   TRUE,
+                                   (time_zone_offset_minutes),
+                                   &error);
+
+    mm_iface_modem_time_update_network_time (MM_IFACE_MODEM_TIME (self), iso8601);
+}
+
+static void
+ms_voice_extensions_notificaiton (MMBroadbandModemMbim *self,
+                                  MbimDevice           *device,
+                                  MbimMessage          *notification)
+{
+    if (mbim_message_indicate_status_get_cid (notification) != MBIM_CID_MS_VOICE_EXTENSIONS_NITZ) {
+        mm_obj_warn (self, "unexpected ms voice extenstions notification (cid %u)", mbim_message_indicate_status_get_cid (notification));
+        return;
+    }
+
+    if (!(self->priv->setup_flags & PROCESS_NOTIFICATION_FLAG_NITZ_TIME_INFO))
+        return;
+
+    process_nitz_time_info_notification (self, notification);
+}
+
+
+static void
 port_notification_cb (MMPortMbim           *port,
                       MbimMessage          *notification,
                       MMBroadbandModemMbim *self)
@@ -5810,6 +5884,8 @@ port_notification_cb (MMPortMbim           *port,
         sms_notification (self, device, notification);
     else if (service == MBIM_SERVICE_USSD)
         ussd_notification (self, device, notification);
+    else if (service == MBIM_SERVICE_MS_VOICE_EXTENSIONS)
+        ms_voice_extensions_notificaiton (self, device, notification);
 }
 
 static void
@@ -5822,7 +5898,8 @@ common_setup_cleanup_unsolicited_events_sync (MMBroadbandModemMbim *self,
 
     mm_obj_dbg (self, "supported notifications: signal (%s), registration (%s), sms (%s), "
                 "connect (%s), subscriber (%s), packet (%s), pco (%s), ussd (%s), "
-                "lte attach info (%s), provisioned contexts (%s), slot_info_status (%s)",
+                "lte attach info (%s), provisioned contexts (%s), slot_info_status (%s)"
+                "nitz time info (%s)",
                 self->priv->setup_flags & PROCESS_NOTIFICATION_FLAG_SIGNAL_QUALITY ? "yes" : "no",
                 self->priv->setup_flags & PROCESS_NOTIFICATION_FLAG_REGISTRATION_UPDATES ? "yes" : "no",
                 self->priv->setup_flags & PROCESS_NOTIFICATION_FLAG_SMS_READ ? "yes" : "no",
@@ -5833,7 +5910,8 @@ common_setup_cleanup_unsolicited_events_sync (MMBroadbandModemMbim *self,
                 self->priv->setup_flags & PROCESS_NOTIFICATION_FLAG_USSD ? "yes" : "no",
                 self->priv->setup_flags & PROCESS_NOTIFICATION_FLAG_LTE_ATTACH_INFO ? "yes" : "no",
                 self->priv->setup_flags & PROCESS_NOTIFICATION_FLAG_PROVISIONED_CONTEXTS ? "yes" : "no",
-                self->priv->setup_flags & PROCESS_NOTIFICATION_FLAG_SLOT_INFO_STATUS ? "yes" : "no");
+                self->priv->setup_flags & PROCESS_NOTIFICATION_FLAG_SLOT_INFO_STATUS ? "yes" : "no",
+                self->priv->setup_flags & PROCESS_NOTIFICATION_FLAG_NITZ_TIME_INFO ? "yes" : "no");
 
     if (setup) {
         /* Don't re-enable it if already there */
@@ -5941,6 +6019,8 @@ cleanup_unsolicited_events_3gpp (MMIfaceModem3gpp *_self,
         self->priv->setup_flags &= ~PROCESS_NOTIFICATION_FLAG_LTE_ATTACH_INFO;
     if (self->priv->is_slot_info_status_supported)
         self->priv->setup_flags &= ~PROCESS_NOTIFICATION_FLAG_SLOT_INFO_STATUS;
+    if (self->priv->is_nitz_info_supported)
+        self->priv->setup_flags &= ~PROCESS_NOTIFICATION_FLAG_NITZ_TIME_INFO;
     common_setup_cleanup_unsolicited_events (self, FALSE, callback, user_data);
 
     /* Runtime cached state while enabled, to be cleaned up once disabled */
@@ -5967,6 +6047,8 @@ setup_unsolicited_events_3gpp (MMIfaceModem3gpp *_self,
         self->priv->setup_flags |= PROCESS_NOTIFICATION_FLAG_LTE_ATTACH_INFO;
     if (self->priv->is_slot_info_status_supported)
         self->priv->setup_flags |= PROCESS_NOTIFICATION_FLAG_SLOT_INFO_STATUS;
+    if (self->priv->is_nitz_info_supported)
+        self->priv->setup_flags |= PROCESS_NOTIFICATION_FLAG_NITZ_TIME_INFO;
     common_setup_cleanup_unsolicited_events (self, TRUE, callback, user_data);
 }
 
@@ -6043,7 +6125,8 @@ common_enable_disable_unsolicited_events (MMBroadbandModemMbim *self,
 
     mm_obj_dbg (self, "enabled notifications: signal (%s), registration (%s), sms (%s), "
                 "connect (%s), subscriber (%s), packet (%s), pco (%s), ussd (%s), "
-                "lte attach info (%s), provisioned contexts (%s), slot_info_status (%s)",
+                "lte attach info (%s), provisioned contexts (%s), slot_info_status (%s),"
+                "nitz info (%s)",
                 self->priv->enable_flags & PROCESS_NOTIFICATION_FLAG_SIGNAL_QUALITY ? "yes" : "no",
                 self->priv->enable_flags & PROCESS_NOTIFICATION_FLAG_REGISTRATION_UPDATES ? "yes" : "no",
                 self->priv->enable_flags & PROCESS_NOTIFICATION_FLAG_SMS_READ ? "yes" : "no",
@@ -6054,9 +6137,10 @@ common_enable_disable_unsolicited_events (MMBroadbandModemMbim *self,
                 self->priv->enable_flags & PROCESS_NOTIFICATION_FLAG_USSD ? "yes" : "no",
                 self->priv->enable_flags & PROCESS_NOTIFICATION_FLAG_LTE_ATTACH_INFO ? "yes" : "no",
                 self->priv->enable_flags & PROCESS_NOTIFICATION_FLAG_PROVISIONED_CONTEXTS ? "yes" : "no",
-                self->priv->enable_flags & PROCESS_NOTIFICATION_FLAG_SLOT_INFO_STATUS ? "yes" : "no");
+                self->priv->enable_flags & PROCESS_NOTIFICATION_FLAG_SLOT_INFO_STATUS ? "yes" : "no",
+                self->priv->enable_flags & PROCESS_NOTIFICATION_FLAG_NITZ_TIME_INFO ? "yes" : "no");
 
-    entries = g_new0 (MbimEventEntry *, 5);
+    entries = g_new0 (MbimEventEntry *, 6);
 
     /* Basic connect service */
     if (self->priv->enable_flags & PROCESS_NOTIFICATION_FLAG_SIGNAL_QUALITY ||
@@ -6119,6 +6203,16 @@ common_enable_disable_unsolicited_events (MMBroadbandModemMbim *self,
         entries[n_entries]->cids_count = 1;
         entries[n_entries]->cids = g_new0 (guint32, 1);
         entries[n_entries]->cids[0] = MBIM_CID_USSD;
+        n_entries++;
+    }
+
+    /* Ms Voice extension service */
+    if (self->priv->enable_flags & PROCESS_NOTIFICATION_FLAG_NITZ_TIME_INFO) {
+        entries[n_entries] = g_new (MbimEventEntry, 1);
+        memcpy (&(entries[n_entries]->device_service_id), MBIM_UUID_MS_VOICE_EXTENSIONS, sizeof (MbimUuid));
+        entries[n_entries]->cids_count = 1;
+        entries[n_entries]->cids = g_new0 (guint32, 1);
+        entries[n_entries]->cids[0] = MBIM_CID_MS_VOICE_EXTENSIONS_NITZ;
         n_entries++;
     }
 
@@ -6345,6 +6439,8 @@ modem_3gpp_disable_unsolicited_events (MMIfaceModem3gpp *_self,
         self->priv->enable_flags &= ~PROCESS_NOTIFICATION_FLAG_LTE_ATTACH_INFO;
     if (self->priv->is_slot_info_status_supported)
         self->priv->enable_flags &= ~PROCESS_NOTIFICATION_FLAG_SLOT_INFO_STATUS;
+    if (self->priv->is_nitz_info_supported)
+        self->priv->enable_flags &= ~PROCESS_NOTIFICATION_FLAG_NITZ_TIME_INFO;
     common_enable_disable_unsolicited_events (self, callback, user_data);
 }
 
@@ -6368,6 +6464,8 @@ modem_3gpp_enable_unsolicited_events (MMIfaceModem3gpp *_self,
         self->priv->enable_flags |= PROCESS_NOTIFICATION_FLAG_LTE_ATTACH_INFO;
     if (self->priv->is_slot_info_status_supported)
         self->priv->enable_flags |= PROCESS_NOTIFICATION_FLAG_SLOT_INFO_STATUS;
+    if (self->priv->is_nitz_info_supported)
+        self->priv->enable_flags |= PROCESS_NOTIFICATION_FLAG_NITZ_TIME_INFO;
     common_enable_disable_unsolicited_events (self, callback, user_data);
 }
 
@@ -9618,6 +9716,115 @@ set_packet_service_state (MMIfaceModem3gpp              *self,
                          task);
 }
 
+/*****************************************************************************/
+/* Load network time (Time interface) */
+
+static gboolean
+modem_time_check_support_finish (MMIfaceModemTime *self,
+                                 GAsyncResult     *res,
+                                 GError           **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+modem_time_check_support (MMIfaceModemTime    *_self,
+                          GAsyncReadyCallback callback,
+                          gpointer            user_data)
+{
+    MMBroadbandModemMbim  *self = MM_BROADBAND_MODEM_MBIM (_self);
+    GTask                 *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    mm_obj_dbg (self, "Nitz time capabilities %s", self->priv->is_nitz_info_supported ? "supported" : "not supported");
+    g_task_return_boolean (task, self->priv->is_nitz_info_supported);
+    g_object_unref (task);
+}
+
+static void
+modem_time_load_network_time_response_ready (MbimDevice   *device,
+                                             GAsyncResult *res,
+                                             GTask        *task)
+{
+    g_autoptr(MbimMessage)  response = NULL;
+    guint32                 year;
+    guint32                 month;
+    guint32                 day;
+    guint32                 hour;
+    guint32                 minute;
+    guint32                 second;
+    guint32                 time_zone_offset_minutes;
+    guint32                 daylight_saving_time_offset_minutes;
+    MbimDataClass           data_class;
+    g_autoptr(GError)       error = NULL;
+    gchar                   *iso8601 = NULL;
+
+    response = mbim_device_command_finish (device, res, &error);
+    if(response &&
+        mbim_message_response_get_result (response, MBIM_MESSAGE_TYPE_COMMAND_DONE, &error) &&
+        mbim_message_ms_voice_extensions_nitz_response_parse (response,
+                                                              &year,
+                                                              &month,
+                                                              &day,
+                                                              &hour,
+                                                              &minute,
+                                                              &second,
+                                                              &time_zone_offset_minutes,
+                                                              &daylight_saving_time_offset_minutes,
+                                                              &data_class,
+                                                              &error)) {
+
+        iso8601 = mm_new_iso8601_time (year,
+                                       month,
+                                       day,
+                                       hour,
+                                       minute,
+                                       second,
+                                       TRUE,
+                                       (time_zone_offset_minutes),
+                                       &error);
+
+        g_task_return_pointer (task, iso8601, g_free);
+    } else if (g_error_matches (error, MBIM_STATUS_ERROR, MBIM_STATUS_ERROR_OPERATION_NOT_ALLOWED)) {
+        g_clear_error (&error);
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED, "operation not allowed");
+    } else
+        g_task_return_error (task, error);
+
+    g_object_unref (task);
+}
+
+static gchar *
+modem_time_load_network_time_finish (MMIfaceModemTime *self,
+                                     GAsyncResult     *res,
+                                     GError           **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+modem_time_load_network_time (MMIfaceModemTime    *self,
+                              GAsyncReadyCallback callback,
+                              gpointer            user_data)
+{
+    MbimDevice             *device;
+    g_autoptr(MbimMessage) message = NULL;
+    GTask                  *task;
+
+    if (!peek_device (self, &device, callback, user_data))
+        return;
+
+    task = g_task_new(self, NULL, callback, user_data);
+    mm_obj_dbg (self, "Sending nitz query");
+    message = mbim_message_ms_voice_extensions_nitz_query_new (NULL);
+    mbim_device_command (device,
+                         message,
+                         10,
+                         NULL,
+                         (GAsyncReadyCallback) modem_time_load_network_time_response_ready,
+                         task);
+}
 
 /*****************************************************************************/
 
@@ -9997,6 +10204,15 @@ iface_modem_sar_init (MMIfaceModemSar *iface)
     iface->enable_finish = sar_enable_finish;
     iface->set_power_level = sar_set_power_level;
     iface->set_power_level_finish = sar_set_power_level_finish;
+}
+
+static void
+iface_modem_time_init (MMIfaceModemTime*iface)
+{
+    iface->check_support = modem_time_check_support;
+    iface->check_support_finish = modem_time_check_support_finish;
+    iface->load_network_time = modem_time_load_network_time;
+    iface->load_network_time_finish = modem_time_load_network_time_finish;
 }
 
 #if defined WITH_QMI && QMI_MBIM_QMUX_SUPPORTED
