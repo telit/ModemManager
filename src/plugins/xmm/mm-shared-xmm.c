@@ -1650,6 +1650,39 @@ mm_shared_xmm_location_set_supl_server (MMIfaceModemLocation   *self,
 }
 
 /*****************************************************************************/
+static void
+mm_shared_xmm_send_cclk_cmd (MMBroadbandModem *self)
+{
+    GDateTime                 *local_time = NULL;
+    g_autofree gchar          *cmd = NULL;
+    g_autoptr(MMPortSerialAt)  gps_port = NULL;
+
+    gps_port = shared_xmm_get_gps_control_port (MM_SHARED_XMM (self), NULL);
+    if (!gps_port) {
+        mm_obj_err (self, "GPS port not found, not configuring the clock");
+        return ;
+    }
+
+    local_time = g_date_time_new_now_local ();
+
+    if (!local_time) {
+        mm_obj_err (self, "Error in getting the local time");
+        return;
+    }
+
+    /* Time Format is "yy/MM/dd,hh:mm:ss+TZ" */
+    cmd = g_strdup_printf ("AT+CCLK=\"%d/%d/%d,%d:%d:%d\"",
+                           (g_date_time_get_year (local_time) % 100),
+                            g_date_time_get_month (local_time),
+                            g_date_time_get_day_of_month (local_time), g_date_time_get_hour (local_time),
+                            g_date_time_get_minute (local_time), g_date_time_get_second (local_time));
+
+    /* Send the clock command to set the time on the XMM Module. */
+    mm_base_modem_at_command_full (MM_BASE_MODEM (self),
+                                   gps_port,
+                                   cmd,
+                                   3, FALSE, FALSE, NULL, NULL, NULL);
+}
 
 void
 mm_shared_xmm_setup_ports (MMBroadbandModem *self)
@@ -1679,6 +1712,7 @@ mm_shared_xmm_setup_ports (MMBroadbandModem *self)
                                        gps_port,
                                        "+XLSRSTOP",
                                        3, FALSE, FALSE, NULL, NULL, NULL);
+        mm_shared_xmm_send_cclk_cmd (self);
     }
 }
 
