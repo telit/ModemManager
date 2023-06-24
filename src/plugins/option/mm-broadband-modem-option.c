@@ -40,10 +40,12 @@ static void iface_modem_3gpp_init (MMIfaceModem3gpp *iface);
 static MMIfaceModem *iface_modem_parent;
 static MMIfaceModem3gpp *iface_modem_3gpp_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemOption, mm_broadband_modem_option, MM_TYPE_BROADBAND_MODEM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_SHARED_OPTION, shared_option_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init))
+/* clang-format on */
 
 struct _MMBroadbandModemOptionPrivate {
     /* Regex for access-technology related notifications */

@@ -59,9 +59,11 @@
 static void initable_iface_init   (GInitableIface       *iface);
 static void log_object_iface_init (MMLogObjectInterface *iface);
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBaseManager, mm_base_manager, MM_GDBUS_TYPE_ORG_FREEDESKTOP_MODEM_MANAGER1_SKELETON, 0,
                         G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE, initable_iface_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_LOG_OBJECT, log_object_iface_init))
+/* clang-format on */
 
 enum {
     PROP_0,

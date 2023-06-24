@@ -33,11 +33,12 @@ static void shared_xmm_init           (MMSharedXmm          *iface);
 
 static MMIfaceModemLocation *iface_modem_location_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemMbimXmm, mm_broadband_modem_mbim_xmm, MM_TYPE_BROADBAND_MODEM_MBIM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_LOCATION, iface_modem_location_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_SHARED_XMM,  shared_xmm_init))
-
+/* clang-format on */
 /*****************************************************************************/
 
 MMBroadbandModemMbimXmm *

@@ -35,10 +35,12 @@ static void shared_simtech_init       (MMSharedSimtech      *iface);
 static MMIfaceModemLocation *iface_modem_location_parent;
 static MMIfaceModemVoice    *iface_modem_voice_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemQmiSimtech, mm_broadband_modem_qmi_simtech, MM_TYPE_BROADBAND_MODEM_QMI, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_LOCATION, iface_modem_location_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_VOICE, iface_modem_voice_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_SHARED_SIMTECH, shared_simtech_init))
+/* clang-format on */
 
 /*****************************************************************************/
 

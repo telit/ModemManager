@@ -1,0 +1,16 @@
+BasedOnStyle: GNU
+
+AlignConsecutiveDeclarations: true
+AlignConsecutiveAssignments: true
+AlwaysBreakAfterDefinitionReturnType: All
+BreakBeforeBinaryOperators: None
+BreakBeforeBraces: Linux
+BinPackArguments: false
+BinPackParameters: true
+ColumnLimit: 0
+IndentWidth: 4
+PenaltyReturnTypeOnItsOwnLine: 0
+SortIncludes: false
+SpaceAfterCStyleCast: true
+WhitespaceSensitiveMacros:
+  - g_autoptr

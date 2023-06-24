@@ -29,10 +29,12 @@ static void iface_modem_firmware_init (MMIfaceModemFirmware *iface);
 static void iface_modem_time_init     (MMIfaceModemTime     *iface);
 static void shared_quectel_init       (MMSharedQuectel      *iface);
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemMbimQuectel, mm_broadband_modem_mbim_quectel, MM_TYPE_BROADBAND_MODEM_MBIM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_FIRMWARE, iface_modem_firmware_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_TIME, iface_modem_time_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_SHARED_QUECTEL, shared_quectel_init))
+/* clang-format on */
 
 /*****************************************************************************/
 

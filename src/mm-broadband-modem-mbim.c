@@ -69,6 +69,7 @@ static MMIfaceModemLocation *iface_modem_location_parent;
 static MMIfaceModemSignal *iface_modem_signal_parent;
 static MMIfaceModem       *iface_modem_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemMbim, mm_broadband_modem_mbim, MM_TYPE_BROADBAND_MODEM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init)
@@ -82,6 +83,7 @@ G_DEFINE_TYPE_EXTENDED (MMBroadbandModemMbim, mm_broadband_modem_mbim, MM_TYPE_B
                         G_IMPLEMENT_INTERFACE (MM_TYPE_SHARED_QMI, shared_qmi_init)
 #endif
 )
+/* clang-format on */
 
 typedef enum {
     PROCESS_NOTIFICATION_FLAG_NONE                 = 0,

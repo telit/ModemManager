@@ -35,9 +35,11 @@ static void shared_telit_init (MMSharedTelit *iface);
 
 static MMIfaceModem *iface_modem_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemMbimTelit, mm_broadband_modem_mbim_telit, MM_TYPE_BROADBAND_MODEM_MBIM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_SHARED_TELIT, shared_telit_init))
+/* clang-format on */
 
 /*****************************************************************************/
 /* Load supported modes (Modem interface) */

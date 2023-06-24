@@ -39,9 +39,11 @@ static void iface_modem_messaging_init (MMIfaceModemMessaging *iface);
 
 static MMIfaceModem *iface_modem_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemNokia, mm_broadband_modem_nokia, MM_TYPE_BROADBAND_MODEM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_MESSAGING, iface_modem_messaging_init));
+/* clang-format on */
 
 /*****************************************************************************/
 /* Create SIM (Modem interface) */

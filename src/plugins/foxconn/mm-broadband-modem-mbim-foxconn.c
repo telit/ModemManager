@@ -47,11 +47,13 @@ static void iface_modem_firmware_init (MMIfaceModemFirmware *iface);
 
 static MMIfaceModemLocation *iface_modem_location_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemMbimFoxconn, mm_broadband_modem_mbim_foxconn, MM_TYPE_BROADBAND_MODEM_MBIM, 0,
 #if defined WITH_QMI && QMI_MBIM_QMUX_SUPPORTED
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_FIRMWARE, iface_modem_firmware_init)
 #endif
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_LOCATION, iface_modem_location_init))
+/* clang-format on */
 
 typedef enum {
     FEATURE_SUPPORT_UNKNOWN,

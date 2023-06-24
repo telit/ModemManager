@@ -40,9 +40,11 @@ static void iface_modem_3gpp_init (MMIfaceModem3gpp *iface);
 
 static MMIfaceModem3gpp *iface_modem_3gpp_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemNovatelLte, mm_broadband_modem_novatel_lte, MM_TYPE_BROADBAND_MODEM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init));
+/* clang-format on */
 
 /*****************************************************************************/
 /* Modem power down (Modem interface) */

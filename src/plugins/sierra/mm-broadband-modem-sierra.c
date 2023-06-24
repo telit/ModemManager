@@ -44,10 +44,12 @@ static void iface_modem_time_init (MMIfaceModemTime *iface);
 static MMIfaceModem *iface_modem_parent;
 static MMIfaceModemCdma *iface_modem_cdma_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemSierra, mm_broadband_modem_sierra, MM_TYPE_BROADBAND_MODEM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_CDMA, iface_modem_cdma_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_TIME, iface_modem_time_init));
+/* clang-format on */
 
 typedef enum {
     TIME_METHOD_UNKNOWN = 0,

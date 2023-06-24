@@ -39,10 +39,11 @@ static void iface_modem_voice_init (MMIfaceModemVoice *iface);
 
 static MMIfaceModemVoice *iface_modem_voice_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemUblox, mm_broadband_modem_ublox, MM_TYPE_BROADBAND_MODEM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_VOICE, iface_modem_voice_init))
-
+/* clang-format on */
 
 struct _MMBroadbandModemUbloxPrivate {
     /* USB profile in use */

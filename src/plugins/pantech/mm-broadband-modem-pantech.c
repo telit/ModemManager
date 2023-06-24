@@ -33,9 +33,11 @@ static void iface_modem_messaging_init (MMIfaceModemMessaging *iface);
 
 static MMIfaceModemMessaging *iface_modem_messaging_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemPantech, mm_broadband_modem_pantech, MM_TYPE_BROADBAND_MODEM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_MESSAGING, iface_modem_messaging_init))
+/* clang-format on */
 
 /*****************************************************************************/
 /* Load supported SMS storages (Messaging interface) */

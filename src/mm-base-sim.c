@@ -37,9 +37,11 @@
 static void async_initable_iface_init (GAsyncInitableIface *iface);
 static void log_object_iface_init     (MMLogObjectInterface *iface);
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBaseSim, mm_base_sim, MM_GDBUS_TYPE_SIM_SKELETON, 0,
                         G_IMPLEMENT_INTERFACE (G_TYPE_ASYNC_INITABLE, async_initable_iface_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_LOG_OBJECT, log_object_iface_init))
+/* clang-format on */
 
 enum {
     PROP_0,

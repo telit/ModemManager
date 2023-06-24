@@ -48,11 +48,13 @@ static MMIfaceModem                   *iface_modem_parent;
 static MMIfaceModem3gpp               *iface_modem_3gpp_parent;
 static MMIfaceModem3gppProfileManager *iface_modem_3gpp_profile_manager_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemIcera, mm_broadband_modem_icera, MM_TYPE_BROADBAND_MODEM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP_PROFILE_MANAGER, iface_modem_3gpp_profile_manager_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_TIME, iface_modem_time_init))
+/* clang-format on */
 
 enum {
     PROP_0,

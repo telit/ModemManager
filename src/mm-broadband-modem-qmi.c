@@ -71,6 +71,7 @@ static MMIfaceModemLocation  *iface_modem_location_parent;
 static MMIfaceModemMessaging *iface_modem_messaging_parent;
 static MMIfaceModemVoice     *iface_modem_voice_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemQmi, mm_broadband_modem_qmi, MM_TYPE_BROADBAND_MODEM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init)
@@ -85,6 +86,7 @@ G_DEFINE_TYPE_EXTENDED (MMBroadbandModemQmi, mm_broadband_modem_qmi, MM_TYPE_BRO
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_OMA, iface_modem_oma_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_FIRMWARE, iface_modem_firmware_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_SHARED_QMI, shared_qmi_init))
+/* clang-format on */
 
 struct _MMBroadbandModemQmiPrivate {
     /* Cached device IDs, retrieved by the modem interface when loading device

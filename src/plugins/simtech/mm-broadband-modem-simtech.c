@@ -48,12 +48,14 @@ static MMIfaceModem3gpp     *iface_modem_3gpp_parent;
 static MMIfaceModemLocation *iface_modem_location_parent;
 static MMIfaceModemVoice    *iface_modem_voice_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemSimtech, mm_broadband_modem_simtech, MM_TYPE_BROADBAND_MODEM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_LOCATION, iface_modem_location_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_VOICE, iface_modem_voice_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_SHARED_SIMTECH, shared_simtech_init))
+/* clang-format on */
 
 typedef enum {
     FEATURE_SUPPORT_UNKNOWN,

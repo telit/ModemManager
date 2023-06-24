@@ -36,9 +36,11 @@
 static void iface_modem_init (MMIfaceModem *iface);
 static void iface_modem_cdma_init (MMIfaceModemCdma *iface);
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemAnydata, mm_broadband_modem_anydata, MM_TYPE_BROADBAND_MODEM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_CDMA, iface_modem_cdma_init))
+/* clang-format on */
 
 /*****************************************************************************/
 /* Detailed registration state (CDMA interface) */

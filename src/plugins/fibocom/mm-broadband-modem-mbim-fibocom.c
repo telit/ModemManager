@@ -33,9 +33,11 @@ static void shared_fibocom_init   (MMSharedFibocom  *iface);
 
 static MMIfaceModem3gpp *iface_modem_3gpp_parent;
 
+/* clang-format off */
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemMbimFibocom, mm_broadband_modem_mbim_fibocom, MM_TYPE_BROADBAND_MODEM_MBIM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_SHARED_FIBOCOM,  shared_fibocom_init))
+/* clang-format on */
 
 /******************************************************************************/
 
