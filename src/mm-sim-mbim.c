@@ -12,6 +12,7 @@
  *
  * Copyright (C) 2013 Aleksander Morgado <aleksander@gnu.org>
  * Copyright (C) 2022 Google Inc.
+ * Copyright (C) 2023 HP Development Company, L.P.
  */
 
 #include <config.h>
@@ -402,27 +403,59 @@ load_sim_identifier_finish (MMBaseSim     *_self,
                             GAsyncResult  *res,
                             GError       **error)
 {
-    MMSimMbim *self = MM_SIM_MBIM (_self);
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
 
-    if (!preload_subscriber_info_finish (self, res, error))
-        return NULL;
+static void
+parent_load_sim_identifier_ready (MMBaseSim     *self,
+                                  GAsyncResult  *res,
+                                  GTask         *task)
+{
+    GError *error     = NULL;
+    gchar  *sim_iccid = NULL;
+
+    sim_iccid = MM_BASE_SIM_CLASS (mm_sim_mbim_parent_class)->load_sim_identifier_finish (self, res, &error);
+    if (error)
+        g_task_return_error (task, error);
+    else
+        g_task_return_pointer (task, sim_iccid, g_free);
+
+    g_object_unref (task);
+}
+
+static void
+sim_identifier_preload_subscriber_info_ready (MMBaseSim *_self,
+                                              GAsyncResult *res,
+                                              GTask *task)
+{
+    MMSimMbim         *self           = MM_SIM_MBIM (_self);
+    g_autoptr(GError)  error          = NULL;
+
+    if (!preload_subscriber_info_finish (self, res, &error)) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        return;
+    }
 
     if (self->priv->iccid_error) {
-        g_propagate_error (error, g_error_copy (self->priv->iccid_error));
-        return NULL;
+        mm_obj_dbg (self, "failed to read ICCID through MBIM: %s", self->priv->iccid_error->message);
+        MM_BASE_SIM_CLASS (mm_sim_mbim_parent_class)->load_sim_identifier (_self,
+                                                                           (GAsyncReadyCallback)parent_load_sim_identifier_ready,
+                                                                           task);
+        return;
     }
 
     if (self->priv->preload_error) {
-        g_propagate_error (error, g_error_copy (self->priv->preload_error));
-        return NULL;
+        g_task_return_error (task, g_error_copy (self->priv->preload_error));
+        return;
     }
 
     if (!self->priv->iccid) {
-        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED, "SIM iccid not available");
-        return NULL;
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED, "SIM iccid not available");
+        return;
     }
 
-    return g_strdup (self->priv->iccid);
+    g_task_return_pointer (task, g_strdup (self->priv->iccid), g_free);
+    g_object_unref (task);
 }
 
 static void
@@ -430,7 +463,12 @@ load_sim_identifier (MMBaseSim           *self,
                      GAsyncReadyCallback  callback,
                      gpointer             user_data)
 {
-    preload_subscriber_info (MM_SIM_MBIM (self), callback, user_data);
+    GTask *task = NULL;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    preload_subscriber_info (MM_SIM_MBIM (self),
+                             (GAsyncReadyCallback) sim_identifier_preload_subscriber_info_ready,
+                             task);
 }
 
 /*****************************************************************************/
