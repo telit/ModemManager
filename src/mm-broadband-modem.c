@@ -11694,7 +11694,6 @@ typedef enum {
     ENABLING_STEP_IFACE_3GPP_PROFILE_MANAGER,
     ENABLING_STEP_IFACE_3GPP_USSD,
     ENABLING_STEP_IFACE_CDMA,
-    ENABLING_STEP_IFACE_LOCATION,
     ENABLING_STEP_IFACE_MESSAGING,
     ENABLING_STEP_IFACE_TIME,
     ENABLING_STEP_IFACE_SIGNAL,
@@ -11795,7 +11794,6 @@ INTERFACE_ENABLE_READY_FN (iface_modem_3gpp,                 MM_IFACE_MODEM_3GPP
 INTERFACE_ENABLE_READY_FN (iface_modem_3gpp_profile_manager, MM_IFACE_MODEM_3GPP_PROFILE_MANAGER, FALSE)
 INTERFACE_ENABLE_READY_FN (iface_modem_3gpp_ussd,            MM_IFACE_MODEM_3GPP_USSD,            FALSE)
 INTERFACE_ENABLE_READY_FN (iface_modem_cdma,                 MM_IFACE_MODEM_CDMA,                 TRUE)
-INTERFACE_ENABLE_READY_FN (iface_modem_location,             MM_IFACE_MODEM_LOCATION,             FALSE)
 INTERFACE_ENABLE_READY_FN (iface_modem_messaging,            MM_IFACE_MODEM_MESSAGING,            FALSE)
 INTERFACE_ENABLE_READY_FN (iface_modem_voice,                MM_IFACE_MODEM_VOICE,                FALSE)
 INTERFACE_ENABLE_READY_FN (iface_modem_signal,               MM_IFACE_MODEM_SIGNAL,               FALSE)
@@ -11947,19 +11945,6 @@ enabling_step (GTask *task)
                                         g_task_get_cancellable (task),
                                         (GAsyncReadyCallback)iface_modem_cdma_enable_ready,
                                         task);
-            return;
-        }
-        ctx->step++;
-        /* fall through */
-
-    case ENABLING_STEP_IFACE_LOCATION:
-        if (ctx->self->priv->modem_location_dbus_skeleton) {
-            mm_obj_dbg (ctx->self, "modem has location capabilities, enabling the Location interface...");
-            /* Enabling the Modem Location interface */
-            mm_iface_modem_location_enable (MM_IFACE_MODEM_LOCATION (ctx->self),
-                                            g_task_get_cancellable (task),
-                                            (GAsyncReadyCallback)iface_modem_location_enable_ready,
-                                            task);
             return;
         }
         ctx->step++;
@@ -12341,7 +12326,6 @@ typedef enum {
     INITIALIZE_STEP_IFACE_3GPP_PROFILE_MANAGER,
     INITIALIZE_STEP_IFACE_3GPP_USSD,
     INITIALIZE_STEP_IFACE_CDMA,
-    INITIALIZE_STEP_IFACE_LOCATION,
     INITIALIZE_STEP_IFACE_MESSAGING,
     INITIALIZE_STEP_IFACE_TIME,
     INITIALIZE_STEP_IFACE_SIGNAL,
@@ -12351,6 +12335,7 @@ typedef enum {
     INITIALIZE_STEP_IFACE_VOICE,
     INITIALIZE_STEP_IFACE_FIRMWARE,
     INITIALIZE_STEP_IFACE_SIMPLE,
+    INITIALIZE_STEP_IFACE_LOCATION,
     INITIALIZE_STEP_LAST,
 } InitializeStep;
 
@@ -12472,6 +12457,69 @@ iface_modem_initialize_ready (MMBroadbandModem *self,
     initialize_step (task);
 }
 
+static void
+iface_modem_location_initialize_enable_ready (MMBroadbandModem *self,
+                                              GAsyncResult *result,
+                                              GTask *task)
+{
+    InitializeContext *ctx;
+    GError *error = NULL;
+
+    ctx = g_task_get_task_data (task);
+
+    if (!mm_iface_modem_location_enable_finish (MM_IFACE_MODEM_LOCATION (self), result, &error)) {
+        mm_obj_dbg (self, "couldn't enable Location: '%s'", error->message);
+    }
+    /* Go on to next initializing step */
+    ctx->step++;
+    initialize_step (task);
+}
+
+
+static void
+iface_modem_location_initialize_ready (MMBroadbandModem *self,
+                            GAsyncResult *result,
+                            GTask *task)
+{
+    InitializeContext *ctx;
+    GError *error = NULL;
+    ctx = g_task_get_task_data (task);
+
+    if (mm_iface_modem_location_initialize_finish (MM_IFACE_MODEM_LOCATION (self), result, &error)) {
+        mm_obj_dbg (ctx->self, "modem has location capabilities, enabling the Location interface...");
+        /* Enabling the Modem Location interface */
+        mm_iface_modem_location_enable (MM_IFACE_MODEM_LOCATION (ctx->self),
+                                        g_task_get_cancellable (task),
+                                        (GAsyncReadyCallback)iface_modem_location_initialize_enable_ready,
+                                        task);
+        return;
+    }
+
+    mm_obj_dbg (self, "couldn't initialize interface: '%s'", error->message);
+    mm_iface_modem_location_shutdown (MM_IFACE_MODEM_LOCATION (self));
+    g_error_free (error);
+
+    /* Go on to next initializing step */
+    ctx->step++;
+    initialize_step (task);
+}
+
+static gboolean
+is_modem_state_ok_for_location (InitializeContext *ctx)
+{
+    MMModemStateFailedReason reason;
+
+    if (ctx->self->priv->modem_state != MM_MODEM_STATE_FAILED)
+        return TRUE;
+
+    reason = mm_gdbus_modem_get_state_failed_reason (MM_GDBUS_MODEM (ctx->self->priv->modem_dbus_skeleton));
+    return (
+        reason == MM_MODEM_STATE_FAILED_REASON_SIM_MISSING ||
+        reason == MM_MODEM_STATE_FAILED_REASON_SIM_ERROR ||
+        reason == MM_MODEM_STATE_FAILED_REASON_ESIM_WITHOUT_PROFILES
+    );
+}
+
 #undef INTERFACE_INIT_READY_FN
 #define INTERFACE_INIT_READY_FN(NAME,TYPE,FATAL_ERRORS)                 \
     static void                                                         \
@@ -12519,7 +12567,6 @@ INTERFACE_INIT_READY_FN (iface_modem_3gpp,                 MM_IFACE_MODEM_3GPP, 
 INTERFACE_INIT_READY_FN (iface_modem_3gpp_profile_manager, MM_IFACE_MODEM_3GPP_PROFILE_MANAGER, FALSE)
 INTERFACE_INIT_READY_FN (iface_modem_3gpp_ussd,            MM_IFACE_MODEM_3GPP_USSD,            FALSE)
 INTERFACE_INIT_READY_FN (iface_modem_cdma,                 MM_IFACE_MODEM_CDMA,                 TRUE)
-INTERFACE_INIT_READY_FN (iface_modem_location,             MM_IFACE_MODEM_LOCATION,             FALSE)
 INTERFACE_INIT_READY_FN (iface_modem_messaging,            MM_IFACE_MODEM_MESSAGING,            FALSE)
 INTERFACE_INIT_READY_FN (iface_modem_voice,                MM_IFACE_MODEM_VOICE,                FALSE)
 INTERFACE_INIT_READY_FN (iface_modem_time,                 MM_IFACE_MODEM_TIME,                 FALSE)
@@ -12639,14 +12686,6 @@ initialize_step (GTask *task)
         ctx->step++;
        /* fall through */
 
-    case INITIALIZE_STEP_IFACE_LOCATION:
-        /* Initialize the Location interface */
-        mm_iface_modem_location_initialize (MM_IFACE_MODEM_LOCATION (ctx->self),
-                                            g_task_get_cancellable (task),
-                                            (GAsyncReadyCallback)iface_modem_location_initialize_ready,
-                                            task);
-        return;
-
     case INITIALIZE_STEP_IFACE_MESSAGING:
         /* Initialize the Messaging interface */
         mm_iface_modem_messaging_initialize (MM_IFACE_MODEM_MESSAGING (ctx->self),
@@ -12715,6 +12754,18 @@ initialize_step (GTask *task)
         ctx->step++;
        /* fall through */
 
+    case INITIALIZE_STEP_IFACE_LOCATION:
+        /* Initialize the Location interface */
+        if (is_modem_state_ok_for_location(ctx)) {
+            mm_iface_modem_location_initialize (MM_IFACE_MODEM_LOCATION (ctx->self),
+                                                g_task_get_cancellable (task),
+                                                (GAsyncReadyCallback)iface_modem_location_initialize_ready,
+                                                task);
+            return;
+        }
+        ctx->step++;
+       /* fall through */
+
     case INITIALIZE_STEP_LAST:
         if (ctx->self->priv->modem_state == MM_MODEM_STATE_FAILED) {
             GError *error = NULL;
@@ -12738,11 +12789,16 @@ initialize_step (GTask *task)
                  * a firmware update, switch, or provisioning could fix. We also
                  * leave the Voice interface around so that we can attempt
                  * emergency voice calls.
+                 * Additionally, we also leave the Location interface around if
+                 * the modem is in a failed state because of a SIM-related
+                 * issue.
                  */
                 mm_iface_modem_3gpp_profile_manager_shutdown (MM_IFACE_MODEM_3GPP_PROFILE_MANAGER (ctx->self));
                 mm_iface_modem_3gpp_ussd_shutdown (MM_IFACE_MODEM_3GPP_USSD (ctx->self));
                 mm_iface_modem_cdma_shutdown (MM_IFACE_MODEM_CDMA (ctx->self));
-                mm_iface_modem_location_shutdown (MM_IFACE_MODEM_LOCATION (ctx->self));
+                if (!is_modem_state_ok_for_location (ctx)) {
+                    mm_iface_modem_location_shutdown (MM_IFACE_MODEM_LOCATION (ctx->self));
+                }
                 mm_iface_modem_signal_shutdown (MM_IFACE_MODEM_SIGNAL (ctx->self));
                 mm_iface_modem_messaging_shutdown (MM_IFACE_MODEM_MESSAGING (ctx->self));
                 mm_iface_modem_time_shutdown (MM_IFACE_MODEM_TIME (ctx->self));

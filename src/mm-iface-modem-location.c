@@ -941,15 +941,6 @@ handle_setup_auth_ready (MMBaseModem *self,
     g_object_get (self,
                   MM_IFACE_MODEM_STATE, &modem_state,
                   NULL);
-    if (modem_state < MM_MODEM_STATE_ENABLED) {
-        g_dbus_method_invocation_return_error (ctx->invocation,
-                                               MM_CORE_ERROR,
-                                               MM_CORE_ERROR_WRONG_STATE,
-                                               "Cannot setup location: "
-                                               "device not yet enabled");
-        handle_setup_context_free (ctx);
-        return;
-    }
 
     /* If any of the location sources being enabled is NOT supported, set error */
     not_supported = ((mm_gdbus_modem_location_get_capabilities (ctx->skeleton) ^ ctx->sources) & ctx->sources);
@@ -1075,15 +1066,6 @@ handle_set_supl_server_auth_ready (MMBaseModem *self,
     g_object_get (self,
                   MM_IFACE_MODEM_STATE, &modem_state,
                   NULL);
-    if (modem_state < MM_MODEM_STATE_ENABLED) {
-        g_dbus_method_invocation_return_error (ctx->invocation,
-                                               MM_CORE_ERROR,
-                                               MM_CORE_ERROR_WRONG_STATE,
-                                               "Cannot set SUPL server: "
-                                               "device not yet enabled");
-        handle_set_supl_server_context_free (ctx);
-        return;
-    }
 
     /* If A-GPS is NOT supported, set error */
     if (!(mm_gdbus_modem_location_get_capabilities (ctx->skeleton) & (MM_MODEM_LOCATION_SOURCE_AGPS_MSA | MM_MODEM_LOCATION_SOURCE_AGPS_MSB))) {
@@ -1280,15 +1262,6 @@ handle_set_gps_refresh_rate_auth_ready (MMBaseModem *self,
     g_object_get (self,
                   MM_IFACE_MODEM_STATE, &modem_state,
                   NULL);
-    if (modem_state < MM_MODEM_STATE_ENABLED) {
-        g_dbus_method_invocation_return_error (ctx->invocation,
-                                               MM_CORE_ERROR,
-                                               MM_CORE_ERROR_WRONG_STATE,
-                                               "Cannot set SUPL server: "
-                                               "device not yet enabled");
-        handle_set_gps_refresh_rate_context_free (ctx);
-        return;
-    }
 
     /* If GPS is NOT supported, set error */
     if (!(mm_gdbus_modem_location_get_capabilities (ctx->skeleton) & ((MM_MODEM_LOCATION_SOURCE_GPS_RAW |
@@ -1365,15 +1338,6 @@ handle_get_location_auth_ready (MMBaseModem *self,
     g_object_get (self,
                   MM_IFACE_MODEM_STATE, &modem_state,
                   NULL);
-    if (modem_state < MM_MODEM_STATE_ENABLED) {
-        g_dbus_method_invocation_return_error (ctx->invocation,
-                                               MM_CORE_ERROR,
-                                               MM_CORE_ERROR_WRONG_STATE,
-                                               "Cannot get location: "
-                                               "device not yet enabled");
-        handle_get_location_context_free (ctx);
-        return;
-    }
 
     location_ctx = get_location_context (ctx->self);
     mm_gdbus_modem_location_complete_get_location (
