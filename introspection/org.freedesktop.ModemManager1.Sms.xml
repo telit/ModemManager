@@ -244,5 +244,41 @@
     -->
     <property name="Storage" type="u" access="read" />
 
+    <!--
+        Parts:
+
+        An array of sms parts. Each part is composed of an unsigned integer (the
+        part index), a boolean (specifying if it's stored) and the array of
+        bytes (the part data).
+
+        Since: 1.0 FIXME
+    -->
+    <property name="Parts" type="a(ubay)" acces="read" />
+
+
+    <!--
+        DeletePart:
+
+        Delete the part with the given index.
+        This lets the modem free a slot so another part can be retrieved. This
+        helps receiving long messages which don't fit in the modem's limited
+        number of available slots.
+
+        Note: user applications are advised to delete parts they handled to
+        avoid the risk of clogging the modem.
+
+        Note: if parts are deleted before the SMS has transitioned to RECEIVED,
+        the SMS may end up never transitioning to RECEIVED, unless all parts
+        were received in the same daemon runtime.
+
+        Note: on a system reboot, SMS messages for which parts had been removed
+        will end up be reported as RECEIVING if some required parts to complete
+        the message are not found.
+
+        Since: 1.0 FIXME
+    -->
+    <method name="DeletePart">
+        <arg name="index" type="u" direction="in" />
+    </method>
   </interface>
 </node>
