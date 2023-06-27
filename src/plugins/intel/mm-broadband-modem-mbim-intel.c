@@ -104,16 +104,18 @@ iface_modem_location_init (MMIfaceModemLocation *iface)
 {
     iface_modem_location_parent = g_type_interface_peek_parent (iface);
 
-    iface->load_capabilities                 = mm_shared_xmm_location_load_capabilities;
-    iface->load_capabilities_finish          = mm_shared_xmm_location_load_capabilities_finish;
-    iface->enable_location_gathering         = mm_shared_xmm_enable_location_gathering;
-    iface->enable_location_gathering_finish  = mm_shared_xmm_enable_location_gathering_finish;
-    iface->disable_location_gathering        = mm_shared_xmm_disable_location_gathering;
-    iface->disable_location_gathering_finish = mm_shared_xmm_disable_location_gathering_finish;
-    iface->load_supl_server                  = mm_shared_xmm_location_load_supl_server;
-    iface->load_supl_server_finish           = mm_shared_xmm_location_load_supl_server_finish;
-    iface->set_supl_server                   = mm_shared_xmm_location_set_supl_server;
-    iface->set_supl_server_finish            = mm_shared_xmm_location_set_supl_server_finish;
+    iface->load_capabilities                   = mm_shared_xmm_location_load_capabilities;
+    iface->load_capabilities_finish            = mm_shared_xmm_location_load_capabilities_finish;
+    iface->enable_location_gathering           = mm_shared_xmm_enable_location_gathering;
+    iface->enable_location_gathering_finish    = mm_shared_xmm_enable_location_gathering_finish;
+    iface->disable_location_gathering          = mm_shared_xmm_disable_location_gathering;
+    iface->disable_location_gathering_finish   = mm_shared_xmm_disable_location_gathering_finish;
+    iface->load_supl_server                    = mm_shared_xmm_location_load_supl_server;
+    iface->load_supl_server_finish             = mm_shared_xmm_location_load_supl_server_finish;
+    iface->set_supl_server                     = mm_shared_xmm_location_set_supl_server;
+    iface->set_supl_server_finish              = mm_shared_xmm_location_set_supl_server_finish;
+    iface->set_supl_digital_certificate        = mm_shared_xmm_location_set_supl_digital_certificate;
+    iface->set_supl_digital_certificate_finish = mm_shared_xmm_location_set_supl_digital_certificate_finish;
 }
 
 static MMBroadbandModemClass *

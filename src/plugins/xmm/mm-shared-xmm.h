@@ -11,6 +11,7 @@
  * GNU General Public License for more details:
  *
  * Copyright (C) 2018 Aleksander Morgado <aleksander@aleksander.es>
+ * Copyright (C) 2021-2022 Intel Corporation
  */
 
 #ifndef MM_SHARED_XMM_H
@@ -180,5 +181,11 @@ void                   mm_shared_xmm_location_set_supl_server         (MMIfaceMo
 gboolean               mm_shared_xmm_location_set_supl_server_finish  (MMIfaceModemLocation   *self,
                                                                        GAsyncResult           *res,
                                                                        GError                **error);
-
+void                   mm_shared_xmm_location_set_supl_digital_certificate        (MMIfaceModemLocation   *self,
+                                                                                   GVariant               *cert,
+                                                                                   GAsyncReadyCallback     callback,
+                                                                                   gpointer                user_data);
+gboolean               mm_shared_xmm_location_set_supl_digital_certificate_finish (MMIfaceModemLocation   *self,
+                                                                                   GAsyncResult           *res,
+                                                                                   GError                **error);
 #endif /* MM_SHARED_XMM_H */

@@ -18,6 +18,7 @@
  * Copyright (C) 2012 Google, Inc.
  * Copyright (C) 2012 Lanedo GmbH
  * Copyright (C) 2012-2019 Aleksander Morgado <aleksander@aleksander.es>
+ * Copyright (C) 2021-2022 Intel Corporation
  */
 
 #include "config.h"
@@ -67,6 +68,7 @@ static gboolean set_disable_signal_flag;
 static gboolean get_flag;
 static gboolean monitor_flag;
 static gchar *set_supl_server_str;
+static gchar *set_supl_digital_certificate_str;
 static gchar *inject_assistance_data_str;
 static gchar *set_gps_refresh_rate_str;
 
@@ -143,6 +145,10 @@ static GOptionEntry entries[] = {
       "Set SUPL server address",
       "[IP:PORT] or [FQDN:PORT]"
     },
+    { "location-set-supl-digital-certificate", 0, 0, G_OPTION_ARG_STRING, &set_supl_digital_certificate_str,
+      "Set SUPL digital certificate of a device, server or user",
+      "[\"key=value,...\"]"
+    },
     { "location-inject-assistance-data", 0, 0, G_OPTION_ARG_FILENAME, &inject_assistance_data_str,
       "Inject assistance data in the GNSS module",
       "[PATH]"
@@ -217,6 +223,7 @@ mmcli_modem_location_options_enabled (void)
                  get_flag +
                  monitor_flag +
                  !!set_supl_server_str +
+                 !!set_supl_digital_certificate_str +
                  !!inject_assistance_data_str +
                  !!set_gps_refresh_rate_str);
 
@@ -366,6 +373,32 @@ set_supl_server_ready (MMModemLocation *modem_location,
 
     operation_result = mm_modem_location_set_supl_server_finish (modem_location, result, &error);
     set_supl_server_process_reply (operation_result, error);
+
+    mmcli_async_operation_done ();
+}
+
+static void
+set_supl_digital_certificate_process_reply (gboolean      result,
+                                            const GError *error)
+{
+    if (!result) {
+        g_printerr ("error: couldn't set SUPL digital certificate: '%s'\n",
+                    error ? error->message : "unknown error");
+        exit (EXIT_FAILURE);
+    }
+
+    g_print ("successfully set SUPL digital certificate\n");
+}
+
+static void
+set_supl_digital_certificate_ready (MMModemLocation *modem_location,
+                                    GAsyncResult    *result)
+{
+    gboolean operation_result;
+    GError *error = NULL;
+
+    operation_result = mm_modem_location_set_supl_digital_certificate_finish (modem_location, result, &error);
+    set_supl_digital_certificate_process_reply (operation_result, error);
 
     mmcli_async_operation_done ();
 }
@@ -698,6 +731,27 @@ get_modem_ready (GObject      *source,
         return;
     }
 
+    /* Request to set SUPL Digital Certificate */
+    if (set_supl_digital_certificate_str) {
+        GError *error = NULL;
+        g_autoptr(MMModemLocation) cert = NULL;
+
+        cert = mm_get_location_new_from_string (set_supl_digital_certificate_str, &error);
+        if (!cert) {
+            g_printerr ("error: parsing profile string: '%s'\n", error->message);
+            exit (EXIT_FAILURE);
+        }
+
+        g_debug ("Asynchronously setting SUPL digital certificate...");
+        mm_modem_location_set_supl_digital_certificate (ctx->modem_location,
+                                                        cert,
+                                                        ctx->cancellable,
+                                                        (GAsyncReadyCallback)set_supl_digital_certificate_ready,
+                                                        NULL);
+
+        return;
+    }
+
     /* Request to inject assistance data? */
     if (inject_assistance_data_str) {
         guint8 *data;
@@ -825,6 +879,27 @@ mmcli_modem_location_run_synchronous (GDBusConnection *connection)
                                                          NULL,
                                                          &error);
         set_supl_server_process_reply (result, error);
+        return;
+    }
+
+    /* Request to set SUPL Digital Certificate? */
+    if (set_supl_digital_certificate_str) {
+        gboolean result;
+        g_autoptr(MMModemLocation) cert = NULL;
+
+        cert = mm_get_location_new_from_string (set_supl_digital_certificate_str, &error);
+        if (!cert) {
+            g_printerr ("error: parsing profile string: '%s'\n", error->message);
+            exit (EXIT_FAILURE);
+        }
+
+        g_debug ("Synchronously setting SUPL digital certificate...");
+        result = mm_modem_location_set_supl_digital_certificate_sync (ctx->modem_location,
+                                                                      cert,
+                                                                      NULL,
+                                                                      &error);
+
+        set_supl_digital_certificate_process_reply (result, error);
         return;
     }
 

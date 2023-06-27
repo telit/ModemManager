@@ -148,6 +148,36 @@
     </method>
 
     <!--
+        SetSuplDigitalCertificates:
+        @certificates: Dictionary of Digital Certificates, in PEM format.
+
+        A Digital Certificate which proves the authencity of a Device, Server or User.
+
+        Adds digital certificate(s) required to authenticate the connection with the SUPL server.
+        This may be a root server certificate or a user certificate, depending on the specific SUPL server setup.
+        Certificate is associated with a Key i.e. a Generic string, which can be used as mapping for anything
+        like Certificate Slot , Certificate name ...etc.
+
+        <variablelist>
+        <varlistentry><term><literal>"s"</literal></term>
+            <listitem>
+              Certificate Data in PEM format, given as a string value (signature <literal>"s"</literal>)
+            </listitem>
+        </varlistentry>
+        <variablelist>
+        <varlistentry><term><literal>"s"</literal></term>
+            <listitem>
+              Certificate Data in PEM format, given as a string value (signature <literal>"s"</literal>)
+            </listitem>
+        </varlistentry>
+
+        Since: 1.21
+    -->
+    <method name="SetSuplDigitalCertificate">
+      <arg name="certificates" type="a{sv}" direction="in" />
+    </method>
+
+    <!--
         Capabilities:
 
         Bitmask of <link linkend="MMModemLocationSource">MMModemLocationSource</link>

@@ -19,6 +19,7 @@
  *
  * Copyright (C) 2012 Google, Inc.
  * Copyright (C) 2012 Lanedo GmbH <aleksander@lanedo.com>
+ * Copyright (C) 2021-2022 Intel Corporation
  */
 
 #include <gio/gio.h>
@@ -26,6 +27,7 @@
 #include "mm-helpers.h"
 #include "mm-errors-types.h"
 #include "mm-modem-location.h"
+#include "mm-common-helpers.h"
 
 /**
  * SECTION: mm-modem-location
@@ -40,10 +42,15 @@
 
 G_DEFINE_TYPE (MMModemLocation, mm_modem_location, MM_GDBUS_TYPE_MODEM_LOCATION_PROXY)
 
+#define PROPERTY_CERT_NAME "cert-name"
+#define PROPERTY_CERT_DATA "cert-data"
+
 struct _MMModemLocationPrivate {
     /* Common mutex to sync access */
     GMutex mutex;
 
+    gchar             *cert_name;
+    gchar             *cert_data;
     MMLocation3gpp    *signaled_3gpp;
     MMLocationGpsNmea *signaled_gps_nmea;
     MMLocationGpsRaw  *signaled_gps_raw;
@@ -573,6 +580,107 @@ mm_modem_location_set_gps_refresh_rate_sync (MMModemLocation *self,
                                                                    rate,
                                                                    cancellable,
                                                                    error);
+}
+
+/*****************************************************************************/
+/**
+ * mm_modem_location_set_supl_digital_certificate_finish:
+ * @self: A #MMModemLocation.
+ * @res: The #GAsyncResult obtained from the #GAsyncReadyCallback passed to
+ *  mm_modem_location_set_supl_digital_certificate().
+ * @error: Return location for error or %NULL.
+ *
+ * Finishes an operation started with mm_modem_location_set_supl_digital_certificate().
+ *
+ * Returns: %TRUE if setting the SUPL digital certificate was successful, %FALSE if @error is
+ * set.
+ *
+ * Since: 1.22
+ */
+gboolean
+mm_modem_location_set_supl_digital_certificate_finish (MMModemLocation *self,
+                                                       GAsyncResult    *res,
+                                                       GError         **error)
+{
+    g_return_val_if_fail (MM_IS_MODEM_LOCATION (self), FALSE);
+
+    return mm_gdbus_modem_location_call_set_supl_digital_certificate_finish (MM_GDBUS_MODEM_LOCATION (self), res, error);
+}
+
+/**
+ * mm_modem_location_set_supl_digital_certificate:
+ * @self: A #MMModemLocation.
+ * @cert: The certificate is given as dictionary with key-value pair.
+ * @cancellable: (allow-none): A #GCancellable or %NULL.
+ * @callback: A #GAsyncReadyCallback to call when the request is satisfied or
+ *  %NULL.
+ * @user_data: User data to pass to @callback.
+ *
+ * Asynchronously configures the digital certificate for A-GPS operation.
+ *
+ * When the operation is finished, @callback will be invoked in the
+ * <link linkend="g-main-context-push-thread-default">thread-default main loop</link>
+ * of the thread you are calling this method from. You can then call
+ * mm_modem_location_set_supl_digital_certificate_finish() to get the result of the operation.
+ *
+ * See mm_modem_location_set_supl_digital_certificate_sync() for the synchronous, blocking
+ * version of this method.
+ *
+ * Since: 1.22
+ */
+void
+mm_modem_location_set_supl_digital_certificate (MMModemLocation     *self,
+                                                MMModemLocation     *cert,
+                                                GCancellable        *cancellable,
+                                                GAsyncReadyCallback  callback,
+                                                gpointer             user_data)
+{
+    GVariant *cert_dictionary = NULL;
+    g_return_if_fail (MM_IS_MODEM_LOCATION (self));
+
+    cert_dictionary = mm_location_set_supl_digital_certificate_get_dictionary (cert);
+
+    mm_gdbus_modem_location_call_set_supl_digital_certificate (MM_GDBUS_MODEM_LOCATION (self),
+                                                               cert_dictionary,
+                                                               cancellable,
+                                                               callback,
+                                                               user_data);
+}
+
+/**
+ * mm_modem_location_set_supl_digital_certificate_sync:
+ * @self: A #MMModemLocation.
+ * @cert: The certificate is given as dictionary with key-value pair
+ * @cancellable: (allow-none): A #GCancellable or %NULL.
+ * @error: Return location for error or %NULL.
+ *
+ * Synchronously configures the SUPL digital certificate for A-GPS operation.
+ *
+ * The calling thread is blocked until a reply is received. See
+ * mm_modem_location_set_supl_digital_certificate() for the asynchronous version of this
+ * method.
+ *
+ * Returns: %TRUE if setting the SUPL digital certificate was successful, %FALSE if @error is
+ * set.
+ *
+ * Since: 1.22
+ */
+gboolean
+mm_modem_location_set_supl_digital_certificate_sync (MMModemLocation *self,
+                                                     MMModemLocation *cert,
+                                                     GCancellable    *cancellable,
+                                                     GError         **error)
+{
+    GVariant *cert_dictionary = NULL;
+
+    g_return_val_if_fail (MM_IS_MODEM_LOCATION (self), FALSE);
+
+    cert_dictionary = mm_location_set_supl_digital_certificate_get_dictionary (cert);
+
+    return mm_gdbus_modem_location_call_set_supl_digital_certificate_sync (MM_GDBUS_MODEM_LOCATION (self),
+                                                                           cert_dictionary,
+                                                                           cancellable,
+                                                                           error);
 }
 
 /*****************************************************************************/
@@ -1489,4 +1597,169 @@ mm_modem_location_class_init (MMModemLocationClass *modem_class)
     g_type_class_add_private (object_class, sizeof (MMModemLocationPrivate));
 
     object_class->finalize = finalize;
+}
+
+typedef struct {
+    GError                 *error;
+    MMModemLocation        *location_info;
+} ParseKeyValueContext;
+
+void
+mm_location_profile_set_cert_name (MMModemLocation *self, const gchar *value)
+{
+        g_return_if_fail (MM_IS_MODEM_LOCATION (self));
+
+        g_free (self->priv->cert_name);
+        self->priv->cert_name = g_strdup (value);
+}
+
+void
+mm_location_profile_set_cert_data (MMModemLocation *self, const gchar *value)
+{
+        g_return_if_fail (MM_IS_MODEM_LOCATION (self));
+
+        g_free (self->priv->cert_data);
+        self->priv->cert_data = g_strdup (value);
+}
+
+gboolean
+mm_location_profile_consume_string (MMModemLocation *self,
+                                    const gchar     *key,
+                                    const gchar     *value,
+                                    GError         **error)
+{
+    g_return_val_if_fail (MM_IS_MODEM_LOCATION (self), FALSE);
+
+    if (g_str_equal (key, PROPERTY_CERT_DATA)) {
+        mm_location_profile_set_cert_data (self, value);
+    } else if (g_str_equal (key, PROPERTY_CERT_NAME)) {
+        mm_location_profile_set_cert_name (self, value);
+    } else {
+        g_set_error (error,
+                     MM_CORE_ERROR,
+                     MM_CORE_ERROR_UNSUPPORTED,
+                     "Invalid properties string, unsupported key '%s'",
+                     key);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static gboolean
+key_value_foreach (const gchar          *key,
+                   const gchar          *value,
+                   ParseKeyValueContext *ctx)
+{
+    return mm_location_profile_consume_string (ctx->location_info, key, value, &ctx->error);
+}
+
+GVariant *
+mm_location_set_supl_digital_certificate_get_dictionary (MMModemLocation *self)
+{
+    GVariantBuilder builder;
+
+    if (!self)
+        return NULL;
+
+    g_return_val_if_fail (MM_IS_MODEM_LOCATION (self), FALSE);
+
+    g_variant_builder_init (&builder, G_VARIANT_TYPE ("a{sv}"));
+
+    if (self->priv->cert_name)
+        g_variant_builder_add (&builder,
+                               "{sv}",
+                               PROPERTY_CERT_NAME,
+                               g_variant_new_string (self->priv->cert_name));
+
+    if (self->priv->cert_data)
+        g_variant_builder_add (&builder,
+                               "{sv}",
+                               PROPERTY_CERT_DATA,
+                               g_variant_new_string (self->priv->cert_data));
+
+    return g_variant_ref_sink (g_variant_builder_end (&builder));
+}
+
+MMModemLocation *
+mm_get_location_new_from_string (const gchar *str, GError **error)
+{
+    ParseKeyValueContext ctx;
+
+    ctx.error = NULL;
+    ctx.location_info = mm_location_profile_new ();
+
+    mm_common_parse_key_value_string (str,
+                                      &ctx.error,
+                                      (MMParseKeyValueForeachFn)key_value_foreach,
+                                      &ctx);
+    /* If error, destroy the object */
+    if (ctx.error) {
+        g_propagate_error (error, ctx.error);
+        g_object_unref (ctx.location_info);
+        ctx.location_info = NULL;
+    }
+
+    return ctx.location_info;
+}
+
+gboolean
+mm_location_set_supl_digital_certificate_get_cert_name (GVariant *cert_dictionary, gchar **result, GError **error)
+{
+    g_autofree gchar     *key = NULL;
+    GVariantIter          iter;
+    g_autoptr (GVariant)  value = NULL;
+
+    if (!g_variant_is_of_type (cert_dictionary, G_VARIANT_TYPE ("a{sv}"))) {
+        g_set_error (error,
+                     MM_CORE_ERROR,
+                     MM_CORE_ERROR_INVALID_ARGS,
+                     "Cannot create digital cert from dictionary: "
+                     "invalid variant type received");
+        return FALSE;
+    }
+
+    g_variant_iter_init (&iter, cert_dictionary);
+    while (g_variant_iter_next (&iter, "{sv}", &key, &value)) {
+        if (g_str_equal (key, "cert-name")) {
+            g_variant_get (value, "s", result);
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+gboolean
+mm_location_set_supl_digital_certificate_get_cert_data (GVariant *cert_dictionary, gchar **result, GError **error)
+{
+    g_autofree gchar    *key = NULL;
+    GVariantIter         iter;
+    g_autoptr(GVariant)  value = NULL;
+
+    if (!g_variant_is_of_type (cert_dictionary, G_VARIANT_TYPE ("a{sv}"))) {
+        g_set_error (error,
+                     MM_CORE_ERROR,
+                     MM_CORE_ERROR_INVALID_ARGS,
+                     "Cannot create digital cert from dictionary: "
+                     "invalid variant type received");
+        return FALSE;
+    }
+
+    g_variant_iter_init (&iter, cert_dictionary);
+    while (g_variant_iter_next (&iter, "{sv}", &key, &value)) {
+        if (g_str_equal (key, "cert-data")) {
+            g_variant_get (value, "s", result);
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+MMModemLocation *
+mm_location_profile_new (void) {
+
+    return MM_MODEM_LOCATION (g_object_new (MM_TYPE_MODEM_LOCATION, NULL));
+
 }

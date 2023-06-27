@@ -144,6 +144,19 @@ gboolean mm_modem_location_set_gps_refresh_rate_sync   (MMModemLocation *self,
                                                         GCancellable *cancellable,
                                                         GError **error);
 
+void     mm_modem_location_set_supl_digital_certificate        (MMModemLocation *self,
+                                                                MMModemLocation *cert,
+                                                                GCancellable *cancellable,
+                                                                GAsyncReadyCallback callback,
+                                                                gpointer user_data);
+gboolean mm_modem_location_set_supl_digital_certificate_finish (MMModemLocation *self,
+                                                                GAsyncResult *res,
+                                                                GError **error);
+gboolean mm_modem_location_set_supl_digital_certificate_sync   (MMModemLocation *self,
+                                                                MMModemLocation *cert,
+                                                                GCancellable *cancellable,
+                                                                GError **error);
+
 void            mm_modem_location_get_3gpp        (MMModemLocation *self,
                                                    GCancellable *cancellable,
                                                    GAsyncReadyCallback callback,
@@ -216,6 +229,22 @@ MMLocationGpsRaw  *mm_modem_location_get_signaled_gps_raw   (MMModemLocation *se
 MMLocationCdmaBs  *mm_modem_location_peek_signaled_cdma_bs  (MMModemLocation *self);
 MMLocationCdmaBs  *mm_modem_location_get_signaled_cdma_bs   (MMModemLocation *self);
 
+void             mm_location_profile_set_cert_name                       (MMModemLocation *self, const gchar *value);
+void             mm_location_profile_set_cert_data                       (MMModemLocation *self, const gchar *value);
+MMModemLocation *mm_location_profile_new                                 (void);
+GVariant        *mm_location_set_supl_digital_certificate_get_dictionary (MMModemLocation *self);
+MMModemLocation *mm_get_location_new_from_string                         (const gchar *str,
+                                                                          GError **error);
+gboolean         mm_location_set_supl_digital_certificate_get_cert_name  (GVariant *cert_dict,
+                                                                          gchar **result,
+                                                                          GError **error);
+gboolean         mm_location_set_supl_digital_certificate_get_cert_data  (GVariant *cert_dict,
+                                                                          gchar **result,
+                                                                          GError **error);
+gboolean         mm_location_profile_consume_string                      (MMModemLocation *self,
+                                                                          const gchar *key,
+                                                                          const gchar *value,
+                                                                          GError **error);
 G_END_DECLS
 
 #endif /* _MM_MODEM_LOCATION_H_ */

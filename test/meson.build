@@ -6,6 +6,7 @@ test_units = {
   'mmsmsmonitor': libhelpers_dep,
   'mmsmspdu': libhelpers_dep,
   'mmtty': libport_dep,
+  'mmlocation' : libmm_glib_dep,
 }
 
 if enable_udev

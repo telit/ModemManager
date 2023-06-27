@@ -11,6 +11,7 @@
  * GNU General Public License for more details:
  *
  * Copyright (C) 2012 Google, Inc.
+ * Copyright (C) 2021-2022 Intel Corporation
  */
 
 #ifndef MM_IFACE_MODEM_LOCATION_H
@@ -103,6 +104,15 @@ struct _MMIfaceModemLocation {
     gboolean (*inject_assistance_data_finish) (MMIfaceModemLocation  *self,
                                                GAsyncResult          *res,
                                                GError               **error);
+    /* Set Digital Certificate (async) */
+    void (* set_supl_digital_certificate) (MMIfaceModemLocation *self,
+                                           GVariant             *dictionary,
+                                           GAsyncReadyCallback callback,
+                                           gpointer user_data);
+    gboolean (*set_supl_digital_certificate_finish) (MMIfaceModemLocation *self,
+                                                     GAsyncResult *res,
+                                                     GError **error);
+
 };
 
 GType mm_iface_modem_location_get_type (void);

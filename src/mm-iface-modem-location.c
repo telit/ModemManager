@@ -13,6 +13,7 @@
  * Copyright (C) 2012 Google, Inc.
  * Copyright (C) 2012 Lanedo GmbH
  * Copyright (C) 2012-2019 Aleksander Morgado <aleksander@aleksander.es>
+ * Copyright (C) 2021-2022 Intel Corporation
  */
 
 #include <ModemManager.h>
@@ -1409,6 +1410,128 @@ handle_get_location (MmGdbusModemLocation *skeleton,
 
 /*****************************************************************************/
 
+typedef struct {
+    MmGdbusModemLocation  *skeleton;
+    GDBusMethodInvocation *invocation;
+    MMIfaceModemLocation  *self;
+    GVariant              *dictionary;
+} HandleSetSuplDigitalCertificateContext;
+
+static void
+handle_set_supl_digital_certificate_context_free (HandleSetSuplDigitalCertificateContext *ctx)
+{
+    g_object_unref (ctx->skeleton);
+    g_object_unref (ctx->invocation);
+    g_object_unref (ctx->self);
+    g_variant_unref (ctx->dictionary);
+    g_slice_free (HandleSetSuplDigitalCertificateContext, ctx);
+}
+
+static void
+set_supl_digital_certificate_ready (MMIfaceModemLocation *self,
+                                    GAsyncResult *res,
+                                    HandleSetSuplDigitalCertificateContext *ctx)
+{
+    GError *error = NULL;
+
+    if (!MM_IFACE_MODEM_LOCATION_GET_INTERFACE (self)->set_supl_digital_certificate_finish (self, res, &error)) {
+        g_dbus_method_invocation_take_error (ctx->invocation, error);
+    } else {
+        mm_gdbus_modem_location_complete_set_supl_digital_certificate (ctx->skeleton, ctx->invocation);
+    }
+
+    handle_set_supl_digital_certificate_context_free (ctx);
+}
+
+static void
+handle_set_supl_digital_certificate_auth_ready (MMBaseModem *self,
+                                                GAsyncResult *res,
+                                                HandleSetSuplDigitalCertificateContext *ctx)
+{
+    GError *error = NULL;
+
+    if (!mm_base_modem_authorize_finish (self, res, &error)) {
+        g_dbus_method_invocation_take_error (ctx->invocation, error);
+        handle_set_supl_digital_certificate_context_free (ctx);
+        return;
+    }
+
+    /* If A-GPS is NOT supported, set error */
+    if (!(mm_gdbus_modem_location_get_capabilities (ctx->skeleton) & (MM_MODEM_LOCATION_SOURCE_AGPS_MSA | MM_MODEM_LOCATION_SOURCE_AGPS_MSB))) {
+        g_dbus_method_invocation_return_error (ctx->invocation,
+                                               MM_CORE_ERROR,
+                                               MM_CORE_ERROR_UNSUPPORTED,
+                                               "Cannot set digital certificate: "
+                                               "A-GPS not supported");
+       handle_set_supl_digital_certificate_context_free (ctx);
+       return;
+    }
+
+    /* If NOT dictionary, set error */
+    if (!ctx->dictionary) {
+        g_dbus_method_invocation_return_error (ctx->invocation,
+                                               MM_CORE_ERROR,
+                                               MM_CORE_ERROR_INVALID_ARGS,
+                                               "Cannot set digital certificate: "
+                                               "invalid arguments");
+        handle_set_supl_digital_certificate_context_free (ctx);
+        return;
+    }
+
+    /* If dictionary not of type a{sv}, set error */
+    if (!g_variant_is_of_type (ctx->dictionary, G_VARIANT_TYPE ("a{sv}"))) {
+        g_dbus_method_invocation_return_error (ctx->invocation,
+                                               MM_CORE_ERROR,
+                                               MM_CORE_ERROR_INVALID_ARGS,
+                                               "Cannot set digital certificate from dictionary: "
+                                               "invalid variant type received");
+        handle_set_supl_digital_certificate_context_free (ctx);
+        return;
+    }
+
+    /* Check if plugin implements it */
+    if (!MM_IFACE_MODEM_LOCATION_GET_INTERFACE (self)->set_supl_digital_certificate ||
+        !MM_IFACE_MODEM_LOCATION_GET_INTERFACE (self)->set_supl_digital_certificate_finish) {
+        g_dbus_method_invocation_return_error (ctx->invocation,
+                                               MM_CORE_ERROR,
+                                               MM_CORE_ERROR_UNSUPPORTED,
+                                               "Cannot set digital certificate: "
+                                               "not implemented");
+        handle_set_supl_digital_certificate_context_free (ctx);
+        return;
+    }
+
+    /* Send the Digital certificate to the plugin implemented function. */
+    MM_IFACE_MODEM_LOCATION_GET_INTERFACE (self)->set_supl_digital_certificate (ctx->self,
+                                                                                ctx->dictionary,
+                                                                                (GAsyncReadyCallback)set_supl_digital_certificate_ready,
+                                                                                ctx);
+}
+
+static gboolean
+handle_set_supl_digital_certificate (MmGdbusModemLocation  *skeleton,
+                                     GDBusMethodInvocation *invocation,
+                                     GVariant              *dictionary,
+                                     MMIfaceModemLocation  *self)
+{
+    HandleSetSuplDigitalCertificateContext *ctx;
+
+    ctx = g_slice_new (HandleSetSuplDigitalCertificateContext);
+    ctx->skeleton   = g_object_ref (skeleton);
+    ctx->invocation = g_object_ref (invocation);
+    ctx->self       = g_object_ref (self);
+    ctx->dictionary = g_variant_ref (dictionary);
+
+    mm_base_modem_authorize (MM_BASE_MODEM (self),
+                             invocation,
+                             MM_AUTHORIZATION_DEVICE_CONTROL,
+                             (GAsyncReadyCallback)handle_set_supl_digital_certificate_auth_ready,
+                             ctx);
+    return TRUE;
+}
+
+/*****************************************************************************/
+
 typedef struct _DisablingContext DisablingContext;
 static void interface_disabling_step (GTask *task);
 
@@ -1911,6 +2034,11 @@ interface_initialization_step (GTask *task)
         g_signal_connect (ctx->skeleton,
                           "handle-get-location",
                           G_CALLBACK (handle_get_location),
+                          self);
+
+        g_signal_connect (ctx->skeleton,
+                          "handle-set-supl-digital-certificate",
+                          G_CALLBACK (handle_set_supl_digital_certificate),
                           self);
 
         /* Finally, export the new interface */

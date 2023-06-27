@@ -11,6 +11,7 @@
  * GNU General Public License for more details:
  *
  * Copyright (C) 2018 Aleksander Morgado <aleksander@aleksander.es>
+ * Copyright (C) 2021-2022 Intel Corporation
  */
 
 #include <config.h>
@@ -30,6 +31,7 @@
 #include "mm-base-modem-at.h"
 #include "mm-shared-xmm.h"
 #include "mm-modem-helpers-xmm.h"
+#include "mm-modem-location.h"
 
 /*****************************************************************************/
 /* Private data context */
@@ -1588,6 +1590,281 @@ mm_shared_xmm_location_load_supl_server (MMIfaceModemLocation *self,
 }
 
 /*****************************************************************************/
+/* Location: Load SUPL certificate */
+
+#define MAX_XLTC_LEN    300
+#define MAX_XLTC_FRAG   25
+
+typedef struct {
+    gchar *cert_name;
+    gchar *cert_frag;
+    guint  seq_no;
+    guint  cert_len;
+} DigitalCertFragInfo;
+
+typedef struct {
+    GError *error;
+    GList  *cert_frags;
+    guint   n_frags;
+    guint   n_processed_frags;
+} DigitalCertContext;
+
+static void
+setup_digital_cert_context_free (DigitalCertContext *ctx)
+{
+    g_free (ctx);
+}
+
+gboolean
+mm_shared_xmm_location_set_supl_digital_certificate_finish (MMIfaceModemLocation  *self,
+                                                            GAsyncResult          *res,
+                                                            GError               **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+delete_cert_frags (MMBaseModem *self, GTask *task)
+{
+    DigitalCertContext  *ctx = NULL;
+    DigitalCertFragInfo *frag = NULL;
+    GList               *l_elm = NULL;
+
+    ctx = g_task_get_task_data (task);
+
+    while (1) {
+        l_elm = g_list_first (ctx->cert_frags);
+        if (l_elm == NULL) {
+            break;
+        }
+
+        frag = l_elm->data;
+
+        g_free (frag->cert_name);
+        g_free (frag->cert_frag);
+
+        ctx->cert_frags = g_list_delete_link (ctx->cert_frags, l_elm);
+    }
+}
+
+static void
+xltc_ready (MMBaseModem  *self,
+            GAsyncResult *res,
+            GTask        *task)
+{
+    GError              *error = NULL;
+    GList               *l_elm = NULL;
+    g_autofree gchar    *cmd = NULL;
+    DigitalCertContext  *ctx = NULL;
+    DigitalCertFragInfo *frag = NULL;
+
+    ctx = g_task_get_task_data (task);
+    mm_base_modem_at_command_finish (self, res, &error);
+    /* Consider the first error in case subsequent frags report error.*/
+    if (error && (ctx->error == NULL)) {
+        ctx->error = g_error_copy (error);
+    }
+
+    if (ctx->error) {
+        delete_cert_frags (self, task);
+        g_task_return_error (task, ctx->error);
+        g_object_unref (task);
+        return;
+    }
+
+    /* Delete the fragment, before sending next fragment.*/
+    l_elm = g_list_first (ctx->cert_frags);
+    if (l_elm) {
+        frag = l_elm->data;
+        g_free (frag->cert_name);
+        g_free (frag->cert_frag);
+        ctx->cert_frags = g_list_delete_link (ctx->cert_frags, l_elm);
+        ctx->n_processed_frags++;
+    } else {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+
+    /* Get the next fragment.*/
+    l_elm = g_list_first (ctx->cert_frags);
+    if (l_elm == NULL) {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+
+    if (ctx->n_frags == ctx->n_processed_frags) {
+        delete_cert_frags (self, task);
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+
+    frag = l_elm->data;
+    cmd = g_strdup_printf ("+XLTC=\"%s\",%u,%u,%u", frag->cert_frag, frag->cert_len, frag->seq_no, 0);
+    mm_base_modem_at_command (self,
+                              cmd,
+                              3,
+                              FALSE,
+                              (GAsyncReadyCallback)xltc_ready,
+                              task);
+}
+
+static int
+build_certificate_fragment_list (MMIfaceModemLocation   *self,
+                                 gchar                  *cert_name,
+                                 gchar                  *cert,
+                                 GTask                  *task)
+{
+    guint      n_frag = 0;
+    guint      cert_len = 0;
+    guint      frag_len = MAX_XLTC_LEN;
+    guint      offset = 0;
+    guint      seq_no = 0;
+    int        count = 0;
+    DigitalCertContext *cert_ctx;
+    /* The cert fragments are added to GList in cert_ctx and are
+       freed explicitly after sending the XLTC command.*/
+    DigitalCertFragInfo *frag;
+
+    cert_len = strlen (cert);
+    n_frag = (cert_len % MAX_XLTC_LEN) ? ((cert_len / MAX_XLTC_LEN) + 1) : ((cert_len / MAX_XLTC_LEN));
+
+    if ((n_frag > MAX_XLTC_FRAG) || (n_frag == 0)) {
+        mm_obj_err (self, "error in number of fragments: %d", n_frag);
+        return -1;
+    }
+
+    cert_ctx = g_task_get_task_data (task);
+    count = n_frag;
+    do {
+        if (n_frag == 1)
+            frag_len = cert_len % MAX_XLTC_LEN;
+
+        frag = g_malloc0 (sizeof(DigitalCertFragInfo));
+        frag->cert_frag = g_malloc0 (frag_len + 1);
+        frag->cert_name = g_strdup (cert_name);
+        memcpy (frag->cert_frag, &(cert[offset]), frag_len);
+        offset = offset + frag_len;
+        frag->seq_no = ++seq_no;
+        frag->cert_len = cert_len;
+        n_frag--;
+        cert_ctx->cert_frags = g_list_append (cert_ctx->cert_frags, frag);
+    } while (n_frag > 0);
+
+    return count;
+}
+
+static void
+initiate_cert_transfer (MMIfaceModemLocation *self, GTask *task)
+{
+    DigitalCertContext  *cert_ctx = NULL;
+    DigitalCertFragInfo *frag;
+    GList               *list = NULL;
+    g_autofree gchar    *cmd = NULL;
+
+    cert_ctx = g_task_get_task_data (task);
+
+    list = g_list_first (cert_ctx->cert_frags);
+    frag = list->data;
+
+    cmd = g_strdup_printf ("+XLTC=\"%s\",%u,%u,%u", frag->cert_frag, frag->cert_len, frag->seq_no, 0);
+    mm_base_modem_at_command (MM_BASE_MODEM (self),
+                              cmd,
+                              3,
+                              FALSE,
+                              (GAsyncReadyCallback)xltc_ready,
+                              task);
+
+}
+
+void
+mm_shared_xmm_location_set_supl_digital_certificate (MMIfaceModemLocation   *self,
+                                                     GVariant               *dictionary,
+                                                     GAsyncReadyCallback     callback,
+                                                     gpointer                user_data)
+{
+    GTask               *task;
+    DigitalCertContext  *ctx = NULL;
+    GError              *error = NULL;
+    g_autofree gchar    *cert_data = NULL;
+    g_autofree guchar   *base64_cert = NULL;
+    g_autofree gchar    *hex_cert = NULL;
+    g_autofree gchar    *cert_name = NULL;
+    gsize                cert_len = 0;
+    guint                i = 0, j = 0;
+    int                  frag_count = 0;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    if (mm_location_set_supl_digital_certificate_get_cert_name (dictionary, &cert_name, &error) == FALSE) {
+         g_task_return_new_error (task,
+                                  MM_CORE_ERROR,
+                                  MM_CORE_ERROR_INVALID_ARGS,
+                                  "Invalid certificate data");
+                                  g_object_unref (task);
+        return;
+    }
+
+    if (mm_location_set_supl_digital_certificate_get_cert_data (dictionary, &cert_data, &error) == FALSE) {
+         g_task_return_new_error (task,
+                                  MM_CORE_ERROR,
+                                  MM_CORE_ERROR_INVALID_ARGS,
+                                  "Invalid certificate data");
+                                  g_object_unref (task);
+        return;
+    }
+
+    ctx = g_new0 (DigitalCertContext, 1);
+    ctx->n_frags = 0;
+    ctx->n_processed_frags = 0;
+    g_task_set_task_data (task, ctx, (GDestroyNotify)setup_digital_cert_context_free);
+
+    /* validate the input */
+    if (cert_data == NULL || cert_name == NULL) {
+        goto cert_error;
+    }
+
+    base64_cert = g_base64_decode (cert_data, &cert_len);
+    if ((base64_cert == NULL) || (cert_len == 0)) {
+        goto cert_error;
+    }
+
+    /* XMM platforms expects digital certificate to be given in Hex format */
+    hex_cert = g_malloc0 ((cert_len * 2) + 1);
+    j = 0;
+    for (i = 0; i < cert_len; i++) {
+        g_snprintf (&(hex_cert[j]), cert_len * 2, "%02X", base64_cert[i]);
+        j = j + 2;
+    }
+
+    frag_count = build_certificate_fragment_list (self, cert_name, hex_cert, task);
+    if (frag_count < 0) {
+        g_task_return_new_error (task,
+                                 MM_CORE_ERROR,
+                                 MM_CORE_ERROR_INVALID_ARGS,
+                                 "Invalid certificate data");
+                                 g_object_unref (task);
+        return;
+    }
+
+    ctx->n_frags = ctx->n_frags + (guint)frag_count;
+
+    if (ctx->n_frags) {
+        initiate_cert_transfer (self, task);
+        return;
+    }
+
+cert_error:
+    g_task_return_new_error (task,
+                             MM_CORE_ERROR,
+                             MM_CORE_ERROR_INVALID_ARGS,
+                             "Invalid certificate data");
+    g_object_unref (task);
+}
+
+/*****************************************************************************/
 
 gboolean
 mm_shared_xmm_location_set_supl_server_finish (MMIfaceModemLocation  *self,
@@ -1622,6 +1899,7 @@ mm_shared_xmm_location_set_supl_server (MMIfaceModemLocation   *self,
     gchar   *fqdn = NULL;
     guint32  ip;
     guint16  port;
+    g_autoptr(MMPortSerialAt)  gps_port = NULL;
 
     task = g_task_new (self, NULL, callback, user_data);
 
@@ -1639,12 +1917,23 @@ mm_shared_xmm_location_set_supl_server (MMIfaceModemLocation   *self,
     } else
         g_assert_not_reached ();
 
-    mm_base_modem_at_command (MM_BASE_MODEM (self),
-                              cmd,
-                              3,
-                              FALSE,
-                              (GAsyncReadyCallback)xlcsslp_set_ready,
-                              task);
+    gps_port = shared_xmm_get_gps_control_port (MM_SHARED_XMM (self), NULL);
+    if (!gps_port) {
+        mm_obj_err (self, "GPS port not found. Not configuring the clock on XMM module.");
+        goto out;
+    }
+
+    mm_base_modem_at_command_full (MM_BASE_MODEM (self),
+                                   gps_port,
+                                   cmd,
+                                   5,
+                                   FALSE, /* allow_cached */
+                                   FALSE, /* raw */
+                                   NULL, /* cancellable */
+                                   (GAsyncReadyCallback)xlcsslp_set_ready,
+                                   task);
+
+out:
     g_free (cmd);
     g_free (fqdn);
 }
