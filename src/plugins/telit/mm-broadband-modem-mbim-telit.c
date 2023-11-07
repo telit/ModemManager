@@ -25,19 +25,27 @@
 #include "mm-log-object.h"
 #include "mm-modem-helpers.h"
 #include "mm-iface-modem.h"
+#include "mm-iface-modem-3gpp.h"
 #include "mm-base-modem-at.h"
 #include "mm-broadband-modem-mbim-telit.h"
 #include "mm-modem-helpers-telit.h"
 #include "mm-shared-telit.h"
 
-static void iface_modem_init  (MMIfaceModem  *iface);
-static void shared_telit_init (MMSharedTelit *iface);
+static void iface_modem_init      (MMIfaceModem     *iface);
+static void iface_modem_3gpp_init (MMIfaceModem3gpp *iface);
+static void shared_telit_init     (MMSharedTelit    *iface);
 
-static MMIfaceModem *iface_modem_parent;
+static MMIfaceModem     *iface_modem_parent;
+static MMIfaceModem3gpp *iface_modem_3gpp_parent;
 
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemMbimTelit, mm_broadband_modem_mbim_telit, MM_TYPE_BROADBAND_MODEM_MBIM, 0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_SHARED_TELIT, shared_telit_init))
+
+struct _MMBroadbandModemMbimTelitPrivate {
+    GRegex *srvlostena_regex;
+};
 
 /*****************************************************************************/
 /* Load supported modes (Modem interface) */
@@ -199,6 +207,296 @@ load_revision (MMIfaceModem        *self,
 }
 
 /*****************************************************************************/
+/* Enable unsolicited events (3GPP interface) */
+
+static gboolean
+modem_3gpp_enable_disable_unsolicited_events_finish (MMIfaceModem3gpp  *self,
+                                                     GAsyncResult      *res,
+                                                     GError           **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+modem_3gpp_enable_disable_unsolicited_events_ready (MMBroadbandModemMbimTelit *self,
+                                                    GAsyncResult              *res,
+                                                    GTask                     *task)
+{
+    if (!modem_3gpp_enable_disable_unsolicited_events_finish (MM_IFACE_MODEM_3GPP(self), res, NULL))
+        mm_obj_warn (self, "error during modem 3gpp Telit unsolicited enablement");
+
+    /* Error is not blocking */
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+srvlostena_command_ready (MMBaseModem  *self,
+                          GAsyncResult *res,
+                          GTask        *task)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!mm_base_modem_at_command_full_finish (self, res, &error)) {
+        mm_obj_dbg (self, "error in sending srvlostena: %s", error->message);
+        g_task_return_boolean (task, FALSE);
+    } else
+        g_task_return_boolean (task, TRUE);
+
+    g_object_unref (task);
+}
+
+static void
+modem_3gpp_enable_disable_unsolicited_events (MMBroadbandModemMbimTelit *self,
+                                              gboolean                   enable,
+                                              GAsyncReadyCallback        callback,
+                                              GTask                     *task)
+{
+    MMPortSerialAt *port;
+
+    port = mm_base_modem_peek_port_primary (MM_BASE_MODEM (self));
+
+    if (port) {
+        g_autofree gchar *cmd = NULL;
+        GTask            *at_task;
+
+        at_task = g_task_new (self, NULL, callback, task);
+        if (enable)
+            cmd = g_strdup ("#SRVLOSTENA=1");
+        else
+            cmd = g_strdup ("#SRVLOSTENA=0");
+
+        mm_base_modem_at_command_full (MM_BASE_MODEM (self),
+                                       port,
+                                       cmd,
+                                       3,
+                                       FALSE,
+                                       FALSE,
+                                       NULL,
+                                       (GAsyncReadyCallback)srvlostena_command_ready,
+                                       at_task);
+        return;
+    } else {
+        g_task_return_new_error (task,
+                                 MM_CORE_ERROR,
+                                 MM_CORE_ERROR_FAILED,
+                                 "unable to find the primary AT port");
+        g_object_unref (task);
+    }
+}
+
+static void
+parent_3gpp_modem_enable_unsolicited_events_ready (MMIfaceModem3gpp *self,
+                                                   GAsyncResult     *res,
+                                                   GTask            *task)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!iface_modem_3gpp_parent->enable_unsolicited_events_finish (self, res, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+    } else
+        modem_3gpp_enable_disable_unsolicited_events (
+            MM_BROADBAND_MODEM_MBIM_TELIT (self),
+            TRUE,
+            (GAsyncReadyCallback) modem_3gpp_enable_disable_unsolicited_events_ready,
+            task);
+}
+
+static void
+modem_3gpp_enable_unsolicited_events (MMIfaceModem3gpp    *self,
+                                      GAsyncReadyCallback  callback,
+                                      gpointer             user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    /* chain up parent's enable first */
+    iface_modem_3gpp_parent->enable_unsolicited_events (
+        self,
+        (GAsyncReadyCallback)parent_3gpp_modem_enable_unsolicited_events_ready,
+        task);
+}
+
+static void
+parent_modem_3gpp_disable_unsolicited_events_ready (MMIfaceModem3gpp *self,
+                                                    GAsyncResult     *res,
+                                                    GTask            *task)
+{
+    g_autoptr(GError)  error = NULL;
+
+    if (!iface_modem_3gpp_parent->disable_unsolicited_events_finish (self, res, &error))
+        mm_obj_warn (self, "couldn't disable parent modem 3gpp unsolicited events: %s", error->message);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+modem_3gpp_disable_unsolicited_events_ready (MMBroadbandModemMbimTelit *self,
+                                             GAsyncResult              *res,
+                                             GTask                     *task)
+{
+    if (!modem_3gpp_enable_disable_unsolicited_events_finish (MM_IFACE_MODEM_3GPP(self), res, NULL))
+        mm_obj_warn (self, "couldn't disable modem 3gpp Telit unsolicited events");
+
+    /* Chain up parent's disable */
+    iface_modem_3gpp_parent->disable_unsolicited_events (
+        MM_IFACE_MODEM_3GPP (self),
+        (GAsyncReadyCallback)parent_modem_3gpp_disable_unsolicited_events_ready,
+        task);
+}
+
+static void
+modem_3gpp_disable_unsolicited_events (MMIfaceModem3gpp    *self,
+                                       GAsyncReadyCallback  callback,
+                                       gpointer             user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    /* our own disabling first */
+    modem_3gpp_enable_disable_unsolicited_events (MM_BROADBAND_MODEM_MBIM_TELIT (self),
+        FALSE,
+        (GAsyncReadyCallback) modem_3gpp_disable_unsolicited_events_ready,
+        task);
+}
+
+/*****************************************************************************/
+/* Setup/Cleanup unsolicited events (3GPP interface) */
+
+static void
+bearer_list_disconnect_foreach (MMBaseBearer *bearer)
+{
+    mm_base_bearer_disconnect_force (bearer);
+}
+
+static void
+srvlostena_received (MMPortSerialAt            *port,
+                     GMatchInfo                *match_info,
+                     MMBroadbandModemMbimTelit *self)
+{
+    guint srvc_state;
+
+    if (!mm_get_uint_from_match_info (match_info, 1, &srvc_state)) {
+        mm_obj_warn (self, "couldn't parse service status from #SRVLOSTENA line");
+        return;
+    }
+
+    if (srvc_state == 0) {
+        MMBearerList *list = NULL;
+
+        mm_obj_dbg (self, "service lost happened");
+        /* If empty bearer list, nothing else to do */
+        g_object_get (self,
+                      MM_IFACE_MODEM_BEARER_LIST, &list,
+                      NULL);
+        if (!list)
+            return;
+
+        mm_bearer_list_foreach (list,
+                                (MMBearerListForeachFunc)bearer_list_disconnect_foreach,
+                                NULL);
+        g_object_unref (list);
+    } else if (srvc_state == 1)
+        mm_obj_dbg (self, "service PLMN acquired");
+}
+
+static void
+set_unsolicited_events_handlers (MMBroadbandModemMbimTelit *self,
+                                 gboolean                   enable)
+{
+    MMPortSerialAt *port;
+
+    port = mm_base_modem_peek_port_primary (MM_BASE_MODEM (self));
+
+    if (port) {
+        mm_port_serial_at_add_unsolicited_msg_handler (
+            port,
+            self->priv->srvlostena_regex,
+            enable ? (MMPortSerialAtUnsolicitedMsgFn)srvlostena_received : NULL,
+            enable ? self : NULL,
+            NULL);
+    } else
+        mm_obj_dbg (self, "unable to find the primary AT port");
+}
+
+static gboolean
+modem_3gpp_setup_cleanup_unsolicited_events_finish (MMIfaceModem3gpp  *self,
+                                                    GAsyncResult      *res,
+                                                    GError           **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+parent_cleanup_unsolicited_events_ready (MMIfaceModem3gpp *self,
+                                         GAsyncResult     *res,
+                                         GTask            *task)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!iface_modem_3gpp_parent->cleanup_unsolicited_events_finish (self, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+modem_3gpp_cleanup_unsolicited_events (MMIfaceModem3gpp    *self,
+                                       GAsyncReadyCallback  callback,
+                                       gpointer             user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    /* our own cleanup first */
+    set_unsolicited_events_handlers (MM_BROADBAND_MODEM_MBIM_TELIT (self), FALSE);
+
+    /* Chain up parent's setup */
+    iface_modem_3gpp_parent->cleanup_unsolicited_events (
+        self,
+        (GAsyncReadyCallback)parent_cleanup_unsolicited_events_ready,
+        task);
+}
+
+static void
+parent_setup_unsolicited_events_ready (MMIfaceModem3gpp *self,
+                                       GAsyncResult     *res,
+                                       GTask            *task)
+{
+    GError *error = NULL;
+
+    if (!iface_modem_3gpp_parent->setup_unsolicited_events_finish (self, res, &error))
+        g_task_return_error (task, error);
+    else {
+        set_unsolicited_events_handlers (MM_BROADBAND_MODEM_MBIM_TELIT (self), TRUE);
+        g_task_return_boolean (task, TRUE);
+    }
+    g_object_unref (task);
+}
+
+static void
+modem_3gpp_setup_unsolicited_events (MMIfaceModem3gpp    *self,
+                                     GAsyncReadyCallback  callback,
+                                     gpointer             user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    /* Chain up parent's setup */
+    iface_modem_3gpp_parent->setup_unsolicited_events (
+        self,
+        (GAsyncReadyCallback)parent_setup_unsolicited_events_ready,
+        task);
+}
+
+/*****************************************************************************/
 
 MMBroadbandModemMbimTelit *
 mm_broadband_modem_mbim_telit_new (const gchar  *device,
@@ -227,6 +525,34 @@ mm_broadband_modem_mbim_telit_new (const gchar  *device,
 static void
 mm_broadband_modem_mbim_telit_init (MMBroadbandModemMbimTelit *self)
 {
+    /* Initialize private data */
+    self->priv = G_TYPE_INSTANCE_GET_PRIVATE (self, MM_TYPE_BROADBAND_MODEM_MBIM_TELIT, MMBroadbandModemMbimTelitPrivate);
+    self->priv->srvlostena_regex = g_regex_new ("#SRVLOSTENA: 1,\\s*0*([0-1])", G_REGEX_RAW | G_REGEX_OPTIMIZE, 0, NULL);
+}
+
+static void
+finalize (GObject *object)
+{
+    MMBroadbandModemMbimTelit *self = MM_BROADBAND_MODEM_MBIM_TELIT (object);
+
+    g_regex_unref (self->priv->srvlostena_regex);
+    G_OBJECT_CLASS (mm_broadband_modem_mbim_telit_parent_class)->finalize (object);
+}
+
+static void
+iface_modem_3gpp_init (MMIfaceModem3gpp *iface)
+{
+    iface_modem_3gpp_parent = g_type_interface_peek_parent (iface);
+
+    iface->enable_unsolicited_events = modem_3gpp_enable_unsolicited_events;
+    iface->enable_unsolicited_events_finish = modem_3gpp_enable_disable_unsolicited_events_finish;
+    iface->disable_unsolicited_events = modem_3gpp_disable_unsolicited_events;
+    iface->disable_unsolicited_events_finish = modem_3gpp_enable_disable_unsolicited_events_finish;
+
+    iface->setup_unsolicited_events = modem_3gpp_setup_unsolicited_events;
+    iface->setup_unsolicited_events_finish = modem_3gpp_setup_cleanup_unsolicited_events_finish;
+    iface->cleanup_unsolicited_events = modem_3gpp_cleanup_unsolicited_events;
+    iface->cleanup_unsolicited_events_finish = modem_3gpp_setup_cleanup_unsolicited_events_finish;
 }
 
 static void
@@ -265,4 +591,8 @@ shared_telit_init (MMSharedTelit *iface)
 static void
 mm_broadband_modem_mbim_telit_class_init (MMBroadbandModemMbimTelitClass *klass)
 {
+    GObjectClass *object_class = G_OBJECT_CLASS (klass);
+
+    g_type_class_add_private (object_class, sizeof (MMBroadbandModemMbimTelitPrivate));
+    object_class->finalize = finalize;
 }
