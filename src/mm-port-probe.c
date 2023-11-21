@@ -1920,6 +1920,9 @@ initialize_port_type_hints (MMPortProbe *self)
             } else if (!g_strcmp0 (type, "FIREHOSE")) {
                 mm_obj_dbg (self, "port may be FIREHOSE based on the wwan type attribute");
                 auto_ignored = TRUE;
+            } else if (!g_strcmp0 (type, "SAHARA")) {
+                mm_obj_dbg (self, "port may be SAHARA based on the wwan type attribute");
+                auto_ignored = TRUE;
             }
         }
         /* Linux 5.13 does not have 'type' attribute yet, match kernel name instead */
@@ -1941,6 +1944,9 @@ initialize_port_type_hints (MMPortProbe *self)
                 auto_maybe_qcdm = TRUE;
             } else if (g_str_has_suffix (name, "FIREHOSE")) {
                 mm_obj_dbg (self, "port may be FIREHOSE based on the wwan device name");
+                auto_ignored = TRUE;
+            } else if (g_str_has_suffix (name, "SAHARA")) {
+                mm_obj_dbg (self, "port may be SAHARA based on the wwan device name");
                 auto_ignored = TRUE;
             }
         }
