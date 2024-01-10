@@ -45,6 +45,7 @@ G_DEFINE_TYPE_EXTENDED (MMBroadbandModemMbimTelit, mm_broadband_modem_mbim_telit
 
 struct _MMBroadbandModemMbimTelitPrivate {
     GRegex *srvlostena_regex;
+    GRegex *at_5grrcind_regex;
 };
 
 /*****************************************************************************/
@@ -214,7 +215,11 @@ modem_3gpp_enable_disable_unsolicited_events_finish (MMIfaceModem3gpp  *self,
                                                      GAsyncResult      *res,
                                                      GError           **error)
 {
-    return g_task_propagate_boolean (G_TASK (res), error);
+    GError *err = NULL;
+
+    mm_base_modem_at_sequence_finish (MM_BASE_MODEM (self), res, NULL, &err);
+
+    return !err;
 }
 
 static void
@@ -230,21 +235,17 @@ modem_3gpp_enable_disable_unsolicited_events_ready (MMBroadbandModemMbimTelit *s
     g_object_unref (task);
 }
 
-static void
-srvlostena_command_ready (MMBaseModem  *self,
-                          GAsyncResult *res,
-                          GTask        *task)
-{
-    g_autoptr(GError) error = NULL;
+static const MMBaseModemAtCommand enable_unsolicited_events[] = {
+    { "#SRVLOSTENA=1", 3, FALSE, mm_base_modem_response_processor_no_result_continue },
+    { "#5GRRCIND=1",   3, FALSE, mm_base_modem_response_processor_no_result_continue },
+    { NULL }
+};
 
-    if (!mm_base_modem_at_command_full_finish (self, res, &error)) {
-        mm_obj_dbg (self, "error in sending srvlostena: %s", error->message);
-        g_task_return_boolean (task, FALSE);
-    } else
-        g_task_return_boolean (task, TRUE);
-
-    g_object_unref (task);
-}
+static const MMBaseModemAtCommand disable_unsolicited_events[] = {
+    { "#SRVLOSTENA=0", 3, FALSE, mm_base_modem_response_processor_no_result_continue },
+    { "#5GRRCIND=0",   3, FALSE, mm_base_modem_response_processor_no_result_continue },
+    { NULL }
+};
 
 static void
 modem_3gpp_enable_disable_unsolicited_events (MMBroadbandModemMbimTelit *self,
@@ -257,24 +258,20 @@ modem_3gpp_enable_disable_unsolicited_events (MMBroadbandModemMbimTelit *self,
     port = mm_base_modem_peek_port_primary (MM_BASE_MODEM (self));
 
     if (port) {
-        g_autofree gchar *cmd = NULL;
-        GTask            *at_task;
+        const MMBaseModemAtCommand *cmds = NULL;
 
-        at_task = g_task_new (self, NULL, callback, task);
         if (enable)
-            cmd = g_strdup ("#SRVLOSTENA=1");
+            cmds = enable_unsolicited_events;
         else
-            cmd = g_strdup ("#SRVLOSTENA=0");
+            cmds = disable_unsolicited_events;
 
-        mm_base_modem_at_command_full (MM_BASE_MODEM (self),
-                                       port,
-                                       cmd,
-                                       3,
-                                       FALSE,
-                                       FALSE,
-                                       NULL,
-                                       (GAsyncReadyCallback)srvlostena_command_ready,
-                                       at_task);
+        mm_base_modem_at_sequence (MM_BASE_MODEM (self),
+                                   cmds,
+                                   NULL,
+                                   NULL,
+                                   callback,
+                                   task);
+
         return;
     } else {
         g_task_return_new_error (task,
@@ -405,6 +402,37 @@ srvlostena_received (MMPortSerialAt            *port,
 }
 
 static void
+at_5grrcind_received (MMPortSerialAt            *port,
+                      GMatchInfo                *match_info,
+                      MMBroadbandModemMbimTelit *self)
+{
+    guint srvc_state;
+
+    if (!mm_get_uint_from_match_info (match_info, 1, &srvc_state)) {
+        mm_obj_warn (self, "couldn't parse service status from #5GRRCIND line");
+        return;
+    }
+
+    if (srvc_state == 0) {
+        MMBearerList *list = NULL;
+
+        mm_obj_dbg (self, "NR5G RRC idle status");
+        /* If empty bearer list, nothing else to do */
+        g_object_get (self,
+                      MM_IFACE_MODEM_BEARER_LIST, &list,
+                      NULL);
+        if (!list)
+            return;
+
+        mm_bearer_list_foreach (list,
+                                (MMBearerListForeachFunc)bearer_list_disconnect_foreach,
+                                NULL);
+        g_object_unref (list);
+    } else if (srvc_state == 1)
+        mm_obj_dbg (self, "NR5G RRC connected");
+}
+
+static void
 set_unsolicited_events_handlers (MMBroadbandModemMbimTelit *self,
                                  gboolean                   enable)
 {
@@ -417,6 +445,12 @@ set_unsolicited_events_handlers (MMBroadbandModemMbimTelit *self,
             port,
             self->priv->srvlostena_regex,
             enable ? (MMPortSerialAtUnsolicitedMsgFn)srvlostena_received : NULL,
+            enable ? self : NULL,
+            NULL);
+        mm_port_serial_at_add_unsolicited_msg_handler (
+            port,
+            self->priv->at_5grrcind_regex,
+            enable ? (MMPortSerialAtUnsolicitedMsgFn)at_5grrcind_received : NULL,
             enable ? self : NULL,
             NULL);
     } else
@@ -528,6 +562,7 @@ mm_broadband_modem_mbim_telit_init (MMBroadbandModemMbimTelit *self)
     /* Initialize private data */
     self->priv = G_TYPE_INSTANCE_GET_PRIVATE (self, MM_TYPE_BROADBAND_MODEM_MBIM_TELIT, MMBroadbandModemMbimTelitPrivate);
     self->priv->srvlostena_regex = g_regex_new ("#SRVLOSTENA: 1,\\s*0*([0-1])", G_REGEX_RAW | G_REGEX_OPTIMIZE, 0, NULL);
+    self->priv->at_5grrcind_regex = g_regex_new ("#5GRRCIND: 1,([0-1])", G_REGEX_RAW | G_REGEX_OPTIMIZE, 0, NULL);
 }
 
 static void
@@ -536,6 +571,7 @@ finalize (GObject *object)
     MMBroadbandModemMbimTelit *self = MM_BROADBAND_MODEM_MBIM_TELIT (object);
 
     g_regex_unref (self->priv->srvlostena_regex);
+    g_regex_unref (self->priv->at_5grrcind_regex);
     G_OBJECT_CLASS (mm_broadband_modem_mbim_telit_parent_class)->finalize (object);
 }
 
