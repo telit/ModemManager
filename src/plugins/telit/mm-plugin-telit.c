@@ -90,7 +90,7 @@ create_modem (MMPlugin *self,
 MM_PLUGIN_NAMED_CREATOR_SCOPE MMPlugin *
 mm_plugin_create_telit (void)
 {
-    static const gchar *subsystems[] = { "tty", "net", "usbmisc", "wwan", NULL };
+    static const gchar *subsystems[] = { "tty", "net", "usbmisc", "wwan", "qrtr", NULL };
     /* Vendors: Telit */
     static const guint16 vendor_ids[] = { 0x1bc7, 0 };
     static const mm_uint16_pair subsystem_vendor_ids[] = {
@@ -98,6 +98,10 @@ mm_plugin_create_telit (void)
         { 0, 0 }
     };
     static const gchar *vendor_strings[] = { "telit", NULL };
+    static const gchar *udev_tags[] = {
+        "ID_MM_QCOM_SOC",
+        NULL
+    };
     /* Custom init for port identification */
     static const MMAsyncMethod custom_init = {
         .async  = G_CALLBACK (telit_custom_init),
@@ -115,6 +119,7 @@ mm_plugin_create_telit (void)
                       MM_PLUGIN_ALLOWED_QMI,                  TRUE,
                       MM_PLUGIN_ALLOWED_MBIM,                 TRUE,
                       MM_PLUGIN_ALLOWED_QCDM,                 TRUE,
+                      MM_PLUGIN_ALLOWED_UDEV_TAGS,            udev_tags,
                       MM_PLUGIN_CUSTOM_INIT,                  &custom_init,
                       NULL));
 }
