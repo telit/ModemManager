@@ -68,7 +68,7 @@ create_modem (MMPlugin     *self,
 MM_PLUGIN_NAMED_CREATOR_SCOPE MMPlugin *
 mm_plugin_create_qcom_soc (void)
 {
-    static const gchar *subsystems[] = { "wwan", "rpmsg", "net", "qrtr", NULL };
+    static const gchar *subsystems[] = { "wwan", "rpmsg", "net", NULL };
     static const gchar *udev_tags[] = {
         "ID_MM_QCOM_SOC",
         NULL
