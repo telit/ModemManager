@@ -1910,7 +1910,7 @@ initialize_port_type_hints (MMPortProbe *self)
                 auto_maybe_at = TRUE;
             } else if (!g_strcmp0 (type, "MBIM")) {
                 mm_obj_dbg (self, "port may be MBIM based on the wwan type attribute");
-                auto_ignored = TRUE;
+                auto_maybe_mbim = TRUE;
             } else if (!g_strcmp0 (type, "QMI")) {
                 mm_obj_dbg (self, "port may be QMI based on the wwan type attribute");
                 auto_maybe_qmi = TRUE;
@@ -1935,7 +1935,7 @@ initialize_port_type_hints (MMPortProbe *self)
                 auto_maybe_at = TRUE;
             } else if (g_str_has_suffix (name, "MBIM")) {
                 mm_obj_dbg (self, "port may be MBIM based on the wwan device name");
-                auto_ignored = TRUE;
+                auto_maybe_mbim = TRUE;
             } else if (g_str_has_suffix (name, "QMI")) {
                 mm_obj_dbg (self, "port may be QMI based on the wwan device name");
                 auto_maybe_qmi = TRUE;
